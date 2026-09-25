@@ -23,6 +23,9 @@ func TestFakeLoopbackReportsExactLatencyAndNoBreaks(t *testing.T) {
 	if report.BreaksDetected != 0 || report.DropoutsReported != 0 || !report.Passed {
 		t.Fatalf("clean fake loopback did not pass: %+v", report)
 	}
+	if report.DeadlineAvailable {
+		t.Fatal("fake host must mark wake deadline measurements unavailable")
+	}
 }
 
 func TestFakeLoopbackDeterministicFaultMatrix(t *testing.T) {

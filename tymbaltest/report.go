@@ -31,6 +31,7 @@ type Report struct {
 	DurationSeconds       float64      `json:"duration_s"`
 	Load                  []string     `json:"load"`
 	Priority              string       `json:"priority"`
+	DeadlineAvailable     bool         `json:"deadline_available"`
 	Callbacks             uint64       `json:"callbacks"`
 	Late                  uint64       `json:"late"`
 	DropoutsReported      uint64       `json:"dropouts_reported"`

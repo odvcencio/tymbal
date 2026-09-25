@@ -453,13 +453,9 @@ func (s *Stream) setFailure(err error) {
 }
 
 func (s *Stream) loop() {
-	periodDur := time.Duration(int64(s.actual.Period) * int64(time.Second) / int64(s.actual.SampleRate))
-	periodNanos := int64(periodDur)
 	lastDropouts := s.device.Dropouts()
 	var frame uint64
 	var previousWake int64
-	var deadline int64
-	deadlineSet := false
 	discontinuity := false
 	for {
 		if s.stopRequested.Load() {
@@ -504,13 +500,12 @@ func (s *Stream) loop() {
 			s.stats.wakeInterval.Record(time.Duration(woke - previousWake))
 		}
 		previousWake = woke
+		var commitDeadline int64
 		if s.actual.HasDeadline {
-			if !deadlineSet {
-				deadline = woke + periodNanos
-				deadlineSet = true
-			} else {
-				d := woke - deadline
-				if d > 0 {
+			wakeDeadline, due := s.device.Deadlines()
+			if wakeDeadline > 0 && due >= wakeDeadline {
+				commitDeadline = due
+				if d := woke - wakeDeadline; d > 0 {
 					s.stats.wakeLate.Record(time.Duration(d))
 					atomicSaturatingMax(&s.stats.wakeLateMax, d)
 				}
@@ -585,12 +580,11 @@ func (s *Stream) loop() {
 			s.setFailure(commitErr)
 			return
 		}
-		if s.actual.HasDeadline {
+		if commitDeadline > 0 {
 			committed := rt.Now()
-			if committed > deadline {
+			if committed > commitDeadline {
 				atomicSaturatingAdd(&s.stats.late, 1)
 			}
-			deadline += periodNanos
 		}
 		discontinuity = false
 	}

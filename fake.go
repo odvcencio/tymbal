@@ -497,6 +497,10 @@ func (s *fakeStream) Clock() (outNano, inNano int64) {
 	return outNano, inNano
 }
 
+// FakeHost has a virtual clock but no OS device schedule against which to
+// measure wake or commit lateness.
+func (s *fakeStream) Deadlines() (wakeNano, commitNano int64) { return 0, 0 }
+
 func (s *fakeStream) Dropouts() uint64 { return s.dropouts.Load() }
 
 func (s *fakeStream) Recover() error { return nil }

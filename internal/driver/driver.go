@@ -75,6 +75,7 @@ type Stream interface {
 	Buffers() (in, out []byte)
 	Commit() error
 	Clock() (outNano, inNano int64)
+	Deadlines() (wakeNano, commitNano int64) // same monotonic domain as rt.Now; zero if unavailable
 	Dropouts() uint64
 	Recover() error
 	Stop() error

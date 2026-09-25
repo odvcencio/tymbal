@@ -148,6 +148,7 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 		DurationSeconds:       float64(continuousFrames) / float64(actual.SampleRate),
 		Load:                  append([]string{}, opts.Load...),
 		Priority:              actual.Priority,
+		DeadlineAvailable:     actual.HasDeadline,
 		Callbacks:             stats.Callbacks,
 		Late:                  stats.Late,
 		DropoutsReported:      stats.Dropouts,
