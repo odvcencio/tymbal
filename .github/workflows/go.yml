@@ -1,0 +1,30 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Native tests
+        run: go test ./...
+      - name: Native race tests
+        run: go test -race ./...
+      - name: Cgo-free cross-builds, including test binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0
+            echo "Compiling tests for $GOOS/$GOARCH"
+            go test -exec /bin/true ./...
+          done
