@@ -206,7 +206,11 @@ func probeCapture(req driver.Request) (captureProbe, error) {
 	if currentRate != rate || currentChannels != channels || !equalBytes(currentBytes, waveBytes) {
 		return captureProbe{}, fmt.Errorf("%w: WASAPI shared engine format changed during negotiation", driver.ErrFormat)
 	}
-	periodCount, latency, err := captureBufferGeometry(bufferFrames, int(period), rate)
+	periodCount, _, err := captureBufferGeometry(bufferFrames, int(period), rate)
+	if err != nil {
+		return captureProbe{}, err
+	}
+	latency, err := getStreamLatency(client)
 	if err != nil {
 		return captureProbe{}, err
 	}
@@ -333,12 +337,16 @@ func (s *captureStream) openOnStreamThread() error {
 	if bufferFrames != s.bufferFrames {
 		return fmt.Errorf("%w: WASAPI capture buffer changed from %d to %d frames after Open", driver.ErrFormat, s.bufferFrames, bufferFrames)
 	}
-	periodCount, latency, err := captureBufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	periodCount, _, err := captureBufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	if err != nil {
+		return err
+	}
+	latency, err := getStreamLatency(client)
 	if err != nil {
 		return err
 	}
 	if periodCount != s.params.Periods || latency != s.params.LatencyIn {
-		return fmt.Errorf("%w: WASAPI capture buffer geometry changed after Open", driver.ErrFormat)
+		return fmt.Errorf("%w: WASAPI capture buffer geometry or stream latency changed after Open", driver.ErrFormat)
 	}
 	currentFormat, currentPeriod, err := getCurrentSharedEnginePeriod(client)
 	if err != nil {

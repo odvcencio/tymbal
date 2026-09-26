@@ -105,7 +105,10 @@ func openRenderStream(req driver.Request) (driver.Stream, error) {
 		}
 		return nil, fmt.Errorf("tymbal wasapi: %w: a render endpoint is required", driver.ErrUnsupported)
 	}
-	if req.Input != nil || req.Exclusive {
+	if req.Exclusive {
+		return openExclusiveRenderStream(req)
+	}
+	if req.Input != nil {
 		return nil, driver.ErrUnsupported
 	}
 	if req.Output.ID == "" || req.OutChannels <= 0 || req.SampleRate <= 0 || req.Period <= 0 || req.Periods <= 0 {
@@ -208,7 +211,11 @@ func probeRender(req driver.Request) (renderProbe, error) {
 	if currentRate != rate || currentChannels != channels || !equalBytes(currentBytes, waveBytes) {
 		return renderProbe{}, fmt.Errorf("%w: WASAPI shared engine format changed during negotiation", driver.ErrFormat)
 	}
-	periodCount, latency, err := bufferGeometry(bufferFrames, int(period), rate)
+	periodCount, _, err := bufferGeometry(bufferFrames, int(period), rate)
+	if err != nil {
+		return renderProbe{}, err
+	}
+	latency, err := getStreamLatency(client)
 	if err != nil {
 		return renderProbe{}, err
 	}
@@ -315,12 +322,16 @@ func (s *wasapiStream) openOnStreamThread() error {
 	if bufferFrames != s.bufferFrames {
 		return fmt.Errorf("%w: WASAPI buffer changed from %d to %d frames after Open", driver.ErrFormat, s.bufferFrames, bufferFrames)
 	}
-	periodCount, latency, err := bufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	periodCount, _, err := bufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	if err != nil {
+		return err
+	}
+	latency, err := getStreamLatency(client)
 	if err != nil {
 		return err
 	}
 	if periodCount != s.params.Periods || latency != s.params.LatencyOut {
-		return fmt.Errorf("%w: WASAPI buffer geometry changed after Open", driver.ErrFormat)
+		return fmt.Errorf("%w: WASAPI buffer geometry or stream latency changed after Open", driver.ErrFormat)
 	}
 	currentFormat, currentPeriod, err := getCurrentSharedEnginePeriod(client)
 	if err != nil {

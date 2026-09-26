@@ -366,10 +366,10 @@ func inspectEndpoint(endpoint uintptr, direction uint8) (driver.Info, error) {
 		info.Outputs = channels
 	} else {
 		info.Inputs = channels
-		// Capture is the only implemented exclusive direction. Capability probes
-		// describe exact format support; Open still negotiates device ownership.
-		info.Exclusive, _ = supportsAnyExclusiveFormat(audioClient, mixFormat, rate, channels)
 	}
+	// Capability probes describe exact format support. Open still negotiates
+	// device ownership and the actual buffer geometry for each direction.
+	info.Exclusive, _ = supportsAnyExclusiveFormat(audioClient, mixFormat, rate, channels)
 	return info, nil
 }
 

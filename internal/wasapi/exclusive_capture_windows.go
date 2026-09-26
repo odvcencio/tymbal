@@ -149,7 +149,11 @@ func probeExclusiveCapture(req driver.Request) (exclusiveCaptureProbe, error) {
 		return exclusiveCaptureProbe{}, classifyExclusiveError("IAudioClient.SetEventHandle", err)
 	}
 
-	periods, latency, err := captureBufferGeometry(bufferFrames, req.Period, req.SampleRate)
+	periods, _, err := captureBufferGeometry(bufferFrames, req.Period, req.SampleRate)
+	if err != nil {
+		return exclusiveCaptureProbe{}, err
+	}
+	latency, err := getStreamLatency(client)
 	if err != nil {
 		return exclusiveCaptureProbe{}, err
 	}
@@ -235,12 +239,16 @@ func (s *exclusiveCaptureStream) openExclusiveOnStreamThread() error {
 	if bufferFrames != s.bufferFrames || actualHNS != s.bufferHNS {
 		return fmt.Errorf("%w: exclusive capture buffer changed from %d frames at %d hns to %d frames at %d hns after Open", driver.ErrFormat, s.bufferFrames, s.bufferHNS, bufferFrames, actualHNS)
 	}
-	periods, latency, err := captureBufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	periods, _, err := captureBufferGeometry(bufferFrames, s.params.Period, s.params.SampleRate)
+	if err != nil {
+		return err
+	}
+	latency, err := getStreamLatency(s.client)
 	if err != nil {
 		return err
 	}
 	if periods != s.params.Periods || latency != s.params.LatencyIn {
-		return fmt.Errorf("%w: exclusive capture buffer geometry changed after Open", driver.ErrFormat)
+		return fmt.Errorf("%w: exclusive capture buffer geometry or stream latency changed after Open", driver.ErrFormat)
 	}
 	if err := createExclusiveCaptureEvents(&s.captureStream); err != nil {
 		return err
