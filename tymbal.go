@@ -49,7 +49,7 @@ func (h Host) Devices() ([]Device, error) {
 	}
 	devices, err := h.d.Devices()
 	if err != nil {
-		return nil, err
+		return nil, mapBackendError(err)
 	}
 	out := make([]Device, len(devices))
 	for i := range devices {
@@ -65,7 +65,7 @@ func (h Host) Default(dir Direction) (Device, error) {
 	}
 	d, err := h.d.Default(uint8(dir))
 	if err != nil {
-		return Device{}, err
+		return Device{}, mapBackendError(err)
 	}
 	return publicDevice(h.d.Name(), d), nil
 }
@@ -183,7 +183,3 @@ func driverInfo(d Device) driver.Info {
 		Default: uint8(d.Default), Exclusive: d.Exclusive,
 	}
 }
-
-// Hosts returns the platform audio backends, preferred first. The M0 build
-// only includes NewFakeHost, so the result is empty.
-func Hosts() []Host { return nil }

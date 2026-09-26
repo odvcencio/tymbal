@@ -108,7 +108,7 @@ func Open(h Host, cfg Config, cb Callback) (*Stream, error) {
 
 	devices, err := h.d.Devices()
 	if err != nil {
-		return nil, err
+		return nil, mapBackendError(err)
 	}
 	var outInfo, inInfo *driver.Info
 	if cfg.Output != nil {
@@ -133,7 +133,7 @@ func Open(h Host, cfg Config, cb Callback) (*Stream, error) {
 	}
 	ds, err := h.d.Open(req)
 	if err != nil {
-		return nil, err
+		return nil, mapBackendError(err)
 	}
 	p := ds.Params()
 	if err := validateParams(p, directions); err != nil {
@@ -197,6 +197,24 @@ func Open(h Host, cfg Config, cb Callback) (*Stream, error) {
 	_ = inBytes
 	_ = outBytes
 	return s, nil
+}
+
+func mapBackendError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, driver.ErrBusy):
+		return fmt.Errorf("%w: %v", ErrBusy, err)
+	case errors.Is(err, driver.ErrFormat):
+		return fmt.Errorf("%w: %v", ErrFormat, err)
+	case errors.Is(err, driver.ErrUnsupported):
+		return fmt.Errorf("%w: %v", ErrUnsupported, err)
+	case errors.Is(err, driver.ErrLost):
+		return fmt.Errorf("%w: %v", ErrDeviceLost, err)
+	default:
+		return err
+	}
 }
 
 func findDevice(devices []driver.Info, id string, dir Direction) (driver.Info, bool) {

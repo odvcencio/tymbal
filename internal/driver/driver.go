@@ -18,6 +18,15 @@ var ErrLost = errors.New("tymbal driver: device lost")
 // ErrInterrupted reports a wait ended because Interrupt was requested.
 var ErrInterrupted = errors.New("tymbal driver: interrupted")
 
+// ErrBusy reports that the requested endpoint is already in use.
+var ErrBusy = errors.New("tymbal driver: device busy")
+
+// ErrFormat reports a request the device cannot grant without conversion.
+var ErrFormat = errors.New("tymbal driver: unsupported format or period")
+
+// ErrUnsupported reports a backend mode that has not been implemented.
+var ErrUnsupported = errors.New("tymbal driver: unsupported mode")
+
 // Info describes a device without referring to the public package.
 type Info struct {
 	ID, Name             string
