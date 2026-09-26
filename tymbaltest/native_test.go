@@ -112,6 +112,13 @@ func TestNativeLoopbackFakeOrchestrationAndReport(t *testing.T) {
 	if math.Abs(r.DurationSeconds-4864.0/48000) > 1e-9 || r.Callbacks != 156 {
 		t.Fatalf("complete period sample size: duration=%v callbacks=%d", r.DurationSeconds, r.Callbacks)
 	}
+	var intervals uint64
+	for _, n := range r.WakeIntervalBuckets {
+		intervals += n
+	}
+	if intervals != r.Callbacks-1 || r.WakeIntervalUS.Max <= 0 {
+		t.Fatalf("native report lost serviced-wake observations: count=%d timing=%+v", intervals, r.WakeIntervalUS)
+	}
 	var encoded bytes.Buffer
 	if err := WriteReport(&encoded, r); err != nil {
 		t.Fatal(err)
@@ -122,6 +129,9 @@ func TestNativeLoopbackFakeOrchestrationAndReport(t *testing.T) {
 	decoded, err := ReadReport(&encoded)
 	if err != nil || decoded.LatencyMeasuredFrames != r.LatencyMeasuredFrames || decoded.Callbacks != r.Callbacks || !decoded.Passed {
 		t.Fatalf("existing report round trip: %+v, %v", decoded, err)
+	}
+	if decoded.WakeIntervalUS != r.WakeIntervalUS || decoded.WakeIntervalBuckets != r.WakeIntervalBuckets {
+		t.Fatal("native report round trip changed wake interval observations")
 	}
 }
 

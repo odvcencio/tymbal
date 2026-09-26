@@ -26,15 +26,16 @@ const (
 )
 
 type streamStats struct {
-	callbacks    atomic.Uint64
-	dropouts     atomic.Uint64
-	late         atomic.Uint64
-	wakeLate     Histogram
-	wakeInterval Histogram
-	callbackTime Histogram
-	wakeLateMax  atomic.Int64
-	callbackMax  atomic.Int64
-	allocs       atomic.Uint64
+	callbacks       atomic.Uint64
+	dropouts        atomic.Uint64
+	late            atomic.Uint64
+	wakeLate        Histogram
+	wakeInterval    Histogram
+	callbackTime    Histogram
+	wakeLateMax     atomic.Int64
+	wakeIntervalMax atomic.Int64
+	callbackMax     atomic.Int64
+	allocs          atomic.Uint64
 }
 
 // Stream owns a single negotiated audio stream.
@@ -408,6 +409,7 @@ func (s *Stream) Stats(dst *Stats) {
 	dst.WakeInterval = s.stats.wakeInterval.Snapshot()
 	dst.CallbackTime = s.stats.callbackTime.Snapshot()
 	dst.WakeLateMax = time.Duration(s.stats.wakeLateMax.Load())
+	dst.WakeIntervalMax = time.Duration(s.stats.wakeIntervalMax.Load())
 	dst.CallbackMax = time.Duration(s.stats.callbackMax.Load())
 	dst.AllocsSinceRun = s.stats.allocs.Load() // Process-wide; not attributed to this stream's goroutine.
 }
@@ -517,7 +519,11 @@ func (s *Stream) loop() {
 		}
 		woke := rt.Now()
 		if previousWake != 0 {
-			s.stats.wakeInterval.Record(time.Duration(woke - previousWake))
+			// Elapsed time between serviced wakes includes callback, backend,
+			// recovery, and scheduling time; it is not device deadline lateness.
+			interval := woke - previousWake
+			s.stats.wakeInterval.Record(time.Duration(interval))
+			atomicSaturatingMax(&s.stats.wakeIntervalMax, interval)
 		}
 		previousWake = woke
 		var commitDeadline int64

@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"m31labs.dev/tymbal/internal/rt"
 )
 
 func openManualTestStream(t *testing.T, controlCfg FakeConfig, cb Callback) (*Stream, *FakeControl) {
@@ -176,5 +178,72 @@ func TestConcurrentStatsStopAndClose(t *testing.T) {
 	wg.Wait()
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWakeIntervalStatsAcrossRecovery(t *testing.T) {
+	type observation struct {
+		wakeUpper int64
+		stats     Stats
+	}
+	observed := make(chan observation, 3)
+	var s *Stream
+	s, control := openManualTestStream(t, FakeConfig{Manual: true}, func(tim Time, _, _ [][]float32) {
+		wakeUpper := rt.Now()
+		// Callback work must be included in the next serviced-wake interval.
+		if tim.Frame == 0 {
+			time.Sleep(3 * time.Millisecond)
+		}
+		var stats Stats
+		s.Stats(&stats)
+		observed <- observation{wakeUpper, stats}
+	})
+	defer s.Close()
+	control.InjectDropout(1)
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var previous observation
+	var previousLower int64
+	for i := 0; i < 3; i++ {
+		wakeLower := rt.Now()
+		if err := control.Advance(1); err != nil {
+			t.Fatal(err)
+		}
+		current := <-observed
+		var count uint64
+		for _, n := range current.stats.WakeInterval.Buckets {
+			count += n
+		}
+		if count != uint64(i) {
+			t.Fatalf("period %d: interval count = %d, want %d", i, count, i)
+		}
+		if i == 0 {
+			if current.stats.WakeIntervalMax != 0 {
+				t.Fatal("first serviced wake must not record an interval")
+			}
+		} else {
+			// Bracket real serviced wakes without replacing the core clock.
+			// The raw maximum must be the previous exact maximum or an
+			// observation inside these nanosecond bounds, not a bucket bound.
+			lower := time.Duration(wakeLower - previous.wakeUpper)
+			upper := time.Duration(current.wakeUpper - previousLower)
+			got, prior := current.stats.WakeIntervalMax, previous.stats.WakeIntervalMax
+			if got < max(prior, lower) || got > max(prior, upper) {
+				t.Fatalf("period %d: max = %v, prior = %v, observed interval within [%v, %v]", i, got, prior, lower, upper)
+			}
+		}
+		previous, previousLower = current, wakeLower
+	}
+	if err := s.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	var stopped Stats
+	s.Stats(&stopped)
+	if stopped.WakeIntervalMax != previous.stats.WakeIntervalMax || stopped.WakeInterval.Buckets != previous.stats.WakeInterval.Buckets {
+		t.Fatal("stopped wake interval snapshot changed")
+	}
+	if stopped.Dropouts != 1 || stopped.Late != 0 || stopped.WakeLateMax != 0 || s.Actual().HasDeadline {
+		t.Fatalf("wake observations changed dropout/deadline semantics: %+v", stopped)
 	}
 }

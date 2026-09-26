@@ -153,16 +153,20 @@ type Histogram = hist.Histogram
 // Stats is a lock-free snapshot of stream counters and timing distributions.
 // A live snapshot can contain values from adjacent callbacks; after Stop it is
 // stable.
+// WakeInterval observes elapsed time between serviced wakes, including callback,
+// backend, recovery, and scheduling time, not device deadline lateness.
+// WakeIntervalMax is the exact maximum observed interval, without histogram rounding.
 type Stats struct {
-	Callbacks      uint64
-	Dropouts       uint64
-	Late           uint64
-	WakeLate       Histogram
-	WakeInterval   Histogram
-	CallbackTime   Histogram
-	WakeLateMax    time.Duration
-	CallbackMax    time.Duration
-	AllocsSinceRun uint64
+	Callbacks       uint64
+	Dropouts        uint64
+	Late            uint64
+	WakeLate        Histogram
+	WakeInterval    Histogram
+	CallbackTime    Histogram
+	WakeLateMax     time.Duration
+	WakeIntervalMax time.Duration
+	CallbackMax     time.Duration
+	AllocsSinceRun  uint64
 }
 
 func publicDevice(host string, d driver.Info) Device {

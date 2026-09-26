@@ -11,7 +11,8 @@ import (
 )
 
 // TimingReport is a timing distribution in microseconds. Percentiles are the
-// upper bounds of the corresponding Stats histogram buckets.
+// upper bounds of the corresponding Stats histogram buckets. Max is the exact
+// observed maximum.
 type TimingReport struct {
 	P50  float64 `json:"p50"`
 	P99  float64 `json:"p99"`
@@ -21,6 +22,9 @@ type TimingReport struct {
 
 // Report is a portable snapshot of a loopback run. FakeHost results are
 // marked by Host and describe deterministic virtual behavior, not hardware.
+// WakeIntervalUS and WakeIntervalBuckets describe elapsed observations between
+// serviced wakes, including callback, backend, recovery, and scheduling time,
+// not device deadline lateness.
 type Report struct {
 	Host                  string       `json:"host"`
 	Output                string       `json:"out"`
@@ -40,8 +44,10 @@ type Report struct {
 	LatencyMeasuredFrames int          `json:"latency_measured_frames"`
 	LatencyReportedFrames int          `json:"latency_reported_frames"`
 	WakeLateUS            TimingReport `json:"wake_late_us"`
+	WakeIntervalUS        TimingReport `json:"wake_interval_us"`
 	CallbackUS            TimingReport `json:"callback_us"`
 	WakeLateBuckets       [32]uint64   `json:"wake_late_buckets"`
+	WakeIntervalBuckets   [32]uint64   `json:"wake_interval_buckets"`
 	CallbackBuckets       [32]uint64   `json:"callback_buckets"`
 	Allocs                uint64       `json:"allocs"`
 	Go                    string       `json:"go"`
@@ -55,8 +61,10 @@ type Report struct {
 // FillTiming copies histogram percentiles and the raw maximum from Stats.
 func (r *Report) FillTiming(stats tymbal.Stats) {
 	r.WakeLateUS = timingReport(&stats.WakeLate, stats.WakeLateMax)
+	r.WakeIntervalUS = timingReport(&stats.WakeInterval, stats.WakeIntervalMax)
 	r.CallbackUS = timingReport(&stats.CallbackTime, stats.CallbackMax)
 	r.WakeLateBuckets = stats.WakeLate.Snapshot().Buckets
+	r.WakeIntervalBuckets = stats.WakeInterval.Snapshot().Buckets
 	r.CallbackBuckets = stats.CallbackTime.Snapshot().Buckets
 }
 
