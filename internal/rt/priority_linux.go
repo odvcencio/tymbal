@@ -3,11 +3,16 @@
 package rt
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"m31labs.dev/tymbal/internal/dbus"
 )
 
 const (
@@ -38,11 +43,15 @@ type linuxSchedAttr struct {
 
 // The seam is passed by value: tests never replace process-wide syscall hooks.
 type linuxPriorityCalls struct {
-	getLimit func(int, *syscall.Rlimit) error
-	setLimit func(int, *syscall.Rlimit) error
-	getAttr  func(*linuxSchedAttr) error
-	setAttr  func(*linuxSchedAttr) error
-	getTID   func() int
+	getLimit                      func(int, *syscall.Rlimit) error
+	setLimit                      func(int, *syscall.Rlimit) error
+	getAttr                       func(*linuxSchedAttr) error
+	setAttr                       func(*linuxSchedAttr) error
+	getTID                        func() int
+	getPID                        func() int
+	connect                       func(string, time.Time) (linuxPriorityBus, error)
+	sessionAddress, systemAddress string
+	getBusAddresses               func() (string, string)
 }
 
 // Resource limits are shared by the process. Serialize our read/lower pairs so
@@ -56,6 +65,13 @@ func raisePriority(_ time.Duration) Grant {
 		getAttr:  linuxGetSchedAttr,
 		setAttr:  linuxSetSchedAttr,
 		getTID:   syscall.Gettid,
+		getPID:   os.Getpid,
+		connect: func(address string, deadline time.Time) (linuxPriorityBus, error) {
+			return dbus.Dial(address, deadline)
+		},
+		getBusAddresses: func() (string, string) {
+			return os.Getenv("DBUS_SESSION_BUS_ADDRESS"), linuxSystemBusAddress()
+		},
 	})
 }
 
@@ -66,6 +82,10 @@ func raiseLinuxPriority(c linuxPriorityCalls) Grant {
 	}
 	fallback := Grant{Kind: "normal"}
 	switch previous.Policy {
+	case 0:
+		if previous.Nice < 0 {
+			fallback = Grant{Kind: fmt.Sprintf("nice %d", previous.Nice)}
+		}
 	case linuxSchedFIFO:
 		fallback = Grant{Kind: "SCHED_FIFO", Priority: int(previous.Priority)}
 	case linuxSchedRR:
@@ -106,23 +126,28 @@ func raiseLinuxPriority(c linuxPriorityCalls) Grant {
 	err := c.setAttr(&attr)
 	if err == syscall.EPERM {
 		var limit syscall.Rlimit
-		if c.getLimit(linuxRlimitRTPrio, &limit) != nil || limit.Cur == 0 {
-			return fallback
+		if c.getLimit(linuxRlimitRTPrio, &limit) == nil && limit.Cur != 0 {
+			attr.Priority = uint32(min(limit.Cur, uint64(linuxFIFOPriority)))
+			if wasRT && attr.Priority < previous.Priority {
+				return fallback
+			}
+			err = c.setAttr(&attr) // One retry, never above the requested priority.
 		}
-		attr.Priority = uint32(min(limit.Cur, uint64(linuxFIFOPriority)))
-		if wasRT && attr.Priority < previous.Priority {
-			return fallback
-		}
-		err = c.setAttr(&attr) // One retry, never above the requested priority.
 	}
 	if err != nil {
-		// D-Bus portal, RealtimeKit, and nice fallbacks are unimplemented.
+		if !wasRT && (errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)) {
+			return raiseLinuxServicePriority(c, previous, tid, restore, fallback)
+		}
 		return fallback
 	}
 	return Grant{Kind: "SCHED_FIFO", Priority: int(attr.Priority), restore: restore}
 }
 
 func capLinuxRTTime(c linuxPriorityCalls) bool {
+	return capLinuxRTTimeAt(c, linuxRTTimeCapUS)
+}
+
+func capLinuxRTTimeAt(c linuxPriorityCalls, maximum uint64) bool {
 	linuxRTTimeMu.Lock()
 	defer linuxRTTimeMu.Unlock()
 	var old syscall.Rlimit
@@ -130,14 +155,137 @@ func capLinuxRTTime(c linuxPriorityCalls) bool {
 		return false
 	}
 	limit := syscall.Rlimit{
-		Cur: min(old.Cur, uint64(linuxRTTimeCapUS)),
-		Max: min(old.Max, uint64(linuxRTTimeCapUS)),
+		Cur: min(old.Cur, maximum, uint64(linuxRTTimeCapUS)),
+		Max: min(old.Max, maximum, uint64(linuxRTTimeCapUS)),
 	}
 	if limit == old {
 		return true
 	}
 	// Do not restore this process-wide safety cap in Lower or raise either limit.
 	return c.setLimit(linuxRlimitRTTime, &limit) == nil
+}
+
+// The bus seam is per invocation, just like the syscall seam. No host bus is
+// accessed by syscall-only tests.
+type linuxPriorityBus interface {
+	Get(destination, path, iface, property string) (dbus.Variant, error)
+	Call(destination, path, iface, member, input, output string, args ...any) ([]any, error)
+	Close() error
+}
+
+func linuxSystemBusAddress() string {
+	if address := os.Getenv("DBUS_SYSTEM_BUS_ADDRESS"); address != "" {
+		return address
+	}
+	return "unix:path=/run/dbus/system_bus_socket"
+}
+
+// Each phase has an absolute share of a single one-second budget. A stalled
+// session bus cannot consume the system-bus or final nice fallback's budget.
+// No goroutine is used: verification and restoration stay on the locked thread.
+func raiseLinuxServicePriority(c linuxPriorityCalls, previous linuxSchedAttr, tid int, restore func(), fallback Grant) Grant {
+	if c.connect == nil || c.getPID == nil {
+		return fallback
+	}
+	start := time.Now()
+	if c.getBusAddresses != nil {
+		c.sessionAddress, c.systemAddress = c.getBusAddresses()
+	}
+	type service struct{ address, destination, path, iface string }
+	portal := service{c.sessionAddress, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Realtime"}
+	rtkit := service{c.systemAddress, "org.freedesktop.RealtimeKit1", "/org/freedesktop/RealtimeKit1", "org.freedesktop.RealtimeKit1"}
+	phases := []struct {
+		service service
+		nice    bool
+		budget  time.Duration
+	}{
+		{portal, false, 300 * time.Millisecond},
+		{rtkit, false, 700 * time.Millisecond},
+		{portal, true, 850 * time.Millisecond},
+		{rtkit, true, time.Second},
+	}
+	for _, phase := range phases {
+		s := phase.service
+		deadline := start.Add(phase.budget)
+		if s.address == "" || !time.Now().Before(deadline) {
+			continue
+		}
+		bus, err := c.connect(s.address, deadline)
+		if err != nil {
+			continue
+		}
+		attempted := func() bool {
+			defer bus.Close()
+			var priority any
+			// Portal Realtime v1 and RTKit both expose WithPID methods.
+			// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Realtime.html
+			member, signature := "MakeThreadRealtimeWithPID", "ttu"
+			if phase.nice {
+				v, err := bus.Get(s.destination, s.path, s.iface, "MinNiceLevel")
+				level, ok := v.Value.(int32)
+				// Never worsen a preexisting nice level; RTKit's nice method
+				// also changes policy, so only SCHED_OTHER is eligible.
+				if err != nil || v.Signature != "i" || !ok || level < -20 || level >= 0 || level >= previous.Nice || previous.Policy != 0 {
+					return false
+				}
+				priority, member, signature = level, "MakeThreadHighPriorityWithPID", "tti"
+			} else {
+				v, err := bus.Get(s.destination, s.path, s.iface, "MaxRealtimePriority")
+				maximum, ok := v.Value.(int32)
+				if err != nil || v.Signature != "i" || !ok || maximum <= 0 || maximum > 99 {
+					return false
+				}
+				v, err = bus.Get(s.destination, s.path, s.iface, "RTTimeUSecMax")
+				timeMax, ok := v.Value.(int64)
+				if err != nil || v.Signature != "x" || !ok || timeMax <= 0 || !capLinuxRTTimeAt(c, uint64(timeMax)) {
+					return false
+				}
+				priority = uint32(min(maximum, int32(linuxFIFOPriority)))
+			}
+			if c.getTID() != tid || !time.Now().Before(deadline) {
+				return false
+			}
+			// Inspect the kernel even after an error: a lost reply can follow
+			// a successful service mutation. A successful reply alone proves
+			// nothing about what scheduling the calling thread now has.
+			_, _ = bus.Call(s.destination, s.path, s.iface, member, signature, "", uint64(c.getPID()), uint64(tid), priority)
+			return true
+		}()
+		if !attempted {
+			continue
+		}
+		actual := linuxSchedAttr{Size: previous.Size}
+		if c.getAttr(&actual) != nil {
+			restore()
+			return fallback
+		}
+		if actual.Policy == linuxSchedFIFO || actual.Policy == linuxSchedRR {
+			if actual.Priority == 0 || actual.Priority > 99 || actual.Flags&linuxResetOnFork == 0 {
+				restore()
+				return fallback
+			}
+			kind := "SCHED_RR"
+			if actual.Policy == linuxSchedFIFO {
+				kind = "SCHED_FIFO"
+			}
+			return Grant{Kind: kind, Priority: int(actual.Priority), restore: restore}
+		}
+		if actual.Policy == 0 && actual.Nice < previous.Nice && actual.Nice >= -20 {
+			// Grant.String's common integer formatter handles only positive
+			// values; keep the signed nice level in Kind without changing it.
+			return Grant{Kind: fmt.Sprintf("nice %d", actual.Nice), restore: restore}
+		}
+		if actual.Policy != previous.Policy || actual.Nice != previous.Nice {
+			restore()
+			return fallback
+		}
+		// A failed request may still set RESET_ON_FORK. Retain restoration
+		// even if no priority was granted, so Lower restores what it can.
+		if actual != previous {
+			fallback.restore = restore
+		}
+	}
+	return fallback
 }
 
 func linuxSchedSyscalls() (set, get uintptr) {
