@@ -130,16 +130,32 @@ func TestCaptureBufferGeometryAllowsVariablePacketQuantum(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsDuplexCaptureUntilSharedClockExists(t *testing.T) {
+func TestOpenRejectsExclusiveDuplexBeforeCOM(t *testing.T) {
 	input := &driver.Info{ID: "capture"}
 	output := &driver.Info{ID: "render"}
 	_, err := New().Open(driver.Request{
 		Input: input, Output: output,
 		InChannels: 2, OutChannels: 2,
-		SampleRate: 48_000, Period: 480, Periods: 2,
+		SampleRate: 48_000, Period: 480, Periods: 2, Exclusive: true,
 	})
 	if !errors.Is(err, driver.ErrUnsupported) {
 		t.Fatalf("duplex Open error = %v, want driver.ErrUnsupported", err)
+	}
+}
+
+func TestValidateDuplexGeometry(t *testing.T) {
+	base := driver.Params{SampleRate: 48_000, Period: 480, Periods: 2}
+	if err := validateDuplexGeometry(base, base); err != nil {
+		t.Fatalf("matching duplex geometry rejected: %v", err)
+	}
+	for _, render := range []driver.Params{
+		{SampleRate: 44_100, Period: 480, Periods: 2},
+		{SampleRate: 48_000, Period: 240, Periods: 2},
+		{SampleRate: 48_000, Period: 480, Periods: 3},
+	} {
+		if err := validateDuplexGeometry(base, render); !errors.Is(err, driver.ErrFormat) {
+			t.Errorf("mismatched duplex geometry error=%v, want driver.ErrFormat", err)
+		}
 	}
 }
 

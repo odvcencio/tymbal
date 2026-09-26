@@ -705,8 +705,12 @@ func nearestAllowedPeriod(requested uint64, periods sharedPeriodRange) uint32 {
 }
 
 func initializeShared(client, wave uintptr, period uint32) error {
+	return initializeSharedFlags(client, wave, period, audclntStreamEventCallback)
+}
+
+func initializeSharedFlags(client, wave uintptr, period, flags uint32) error {
 	hr := comCall4(client, audioClient3InitializeSharedAudioStream,
-		audclntStreamEventCallback,
+		uintptr(flags),
 		uintptr(period),
 		wave,
 		0)
