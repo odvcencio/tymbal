@@ -181,9 +181,41 @@ func TestLinuxServiceReplyDoesNotFabricatePriority(t *testing.T) {
 		bus.callErr = callErr
 		f.dial = func(string, time.Time) (linuxPriorityBus, error) { return bus, nil }
 		g := raiseLinuxPriority(f.calls())
-		if g.String() != "normal" || g.restore != nil || len(bus.calls) != 4 || f.attrReads != 5 {
+		if g.String() != "normal" || g.restore == nil || len(bus.calls) != 4 || f.attrReads != 5 {
 			t.Fatalf("fabricated grant %v, methods %d, reads %d", g, len(bus.calls), f.attrReads)
 		}
+	}
+}
+
+func TestLinuxLostReplyRetainsRestoreForDeferredGrant(t *testing.T) {
+	testLinuxDeferredGrantRestore(t, false)
+}
+
+func TestLinuxVerificationFailureRetainsRestoreForDeferredGrant(t *testing.T) {
+	testLinuxDeferredGrantRestore(t, true)
+}
+
+func testLinuxDeferredGrantRestore(t *testing.T, failVerification bool) {
+	t.Helper()
+	f := newServicePriorityFake()
+	if failVerification {
+		f.verificationErr = syscall.EIO
+	}
+	bus := newServiceBus()
+	bus.callErr = errors.New("reply deadline exceeded")
+	f.dial = func(string, time.Time) (linuxPriorityBus, error) { return bus, nil }
+	g := raiseLinuxPriority(f.calls())
+	if g.String() != "normal" {
+		t.Fatalf("reported a grant before the kernel applied it: %v", g)
+	}
+	// The service applies the request after Raise's immediate kernel checks.
+	// Lower must still restore the original thread when the stream finishes.
+	f.actual.Policy = linuxSchedRR
+	f.actual.Priority = 20
+	f.actual.Flags |= linuxResetOnFork
+	Lower(g)
+	if f.actual != f.previous {
+		t.Fatalf("deferred service grant escaped restoration: %+v", f.actual)
 	}
 }
 func TestLinuxServiceLostReplyStillVerifies(t *testing.T) {

@@ -106,18 +106,21 @@ func raiseLinuxPriority(c linuxPriorityCalls) Grant {
 	tid := c.getTID()
 	var once sync.Once
 	// Prepare restoration before granting FIFO; nothing is allocated by Lower.
-	restore := func() {
+	rollback := func() {
 		if c.getTID() != tid {
 			return // Never change a different thread if the caller violates the contract.
 		}
-		once.Do(func() {
-			if err := c.setAttr(&previous); err == syscall.EPERM && previous.Flags&linuxResetOnFork == 0 {
-				// Unprivileged RLIMIT_RTPRIO grants cannot clear RESET_ON_FORK.
-				// Retain that safety flag while restoring the old policy/priority.
-				previous.Flags |= linuxResetOnFork
-				_ = c.setAttr(&previous)
-			}
-		})
+		if err := c.setAttr(&previous); err == syscall.EPERM && previous.Flags&linuxResetOnFork == 0 {
+			// Unprivileged RLIMIT_RTPRIO grants cannot clear RESET_ON_FORK.
+			// Retain that safety flag while restoring the old policy/priority.
+			previous.Flags |= linuxResetOnFork
+			_ = c.setAttr(&previous)
+		}
+	}
+	restore := func() {
+		if c.getTID() == tid {
+			once.Do(rollback)
+		}
 	}
 	attr := linuxSchedAttr{
 		Size: previous.Size, Policy: linuxSchedFIFO,
@@ -136,7 +139,7 @@ func raiseLinuxPriority(c linuxPriorityCalls) Grant {
 	}
 	if err != nil {
 		if !wasRT && (errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)) {
-			return raiseLinuxServicePriority(c, previous, tid, restore, fallback)
+			return raiseLinuxServicePriority(c, previous, tid, rollback, restore, fallback)
 		}
 		return fallback
 	}
@@ -183,7 +186,7 @@ func linuxSystemBusAddress() string {
 // Each phase has an absolute share of a single one-second budget. A stalled
 // session bus cannot consume the system-bus or final nice fallback's budget.
 // No goroutine is used: verification and restoration stay on the locked thread.
-func raiseLinuxServicePriority(c linuxPriorityCalls, previous linuxSchedAttr, tid int, restore func(), fallback Grant) Grant {
+func raiseLinuxServicePriority(c linuxPriorityCalls, previous linuxSchedAttr, tid int, rollback, restore func(), fallback Grant) Grant {
 	if c.connect == nil || c.getPID == nil {
 		return fallback
 	}
@@ -254,14 +257,17 @@ func raiseLinuxServicePriority(c linuxPriorityCalls, previous linuxSchedAttr, ti
 		if !attempted {
 			continue
 		}
+		// Retain restoration even if the immediate kernel check is unchanged:
+		// a service request with a lost reply may finish later in the stream.
+		fallback.restore = restore
 		actual := linuxSchedAttr{Size: previous.Size}
 		if c.getAttr(&actual) != nil {
-			restore()
+			rollback()
 			return fallback
 		}
 		if actual.Policy == linuxSchedFIFO || actual.Policy == linuxSchedRR {
 			if actual.Priority == 0 || actual.Priority > 99 || actual.Flags&linuxResetOnFork == 0 {
-				restore()
+				rollback()
 				return fallback
 			}
 			kind := "SCHED_RR"
@@ -276,13 +282,8 @@ func raiseLinuxServicePriority(c linuxPriorityCalls, previous linuxSchedAttr, ti
 			return Grant{Kind: fmt.Sprintf("nice %d", actual.Nice), restore: restore}
 		}
 		if actual.Policy != previous.Policy || actual.Nice != previous.Nice {
-			restore()
+			rollback()
 			return fallback
-		}
-		// A failed request may still set RESET_ON_FORK. Retain restoration
-		// even if no priority was granted, so Lower restores what it can.
-		if actual != previous {
-			fallback.restore = restore
 		}
 	}
 	return fallback
