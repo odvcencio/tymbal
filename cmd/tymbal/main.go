@@ -7,6 +7,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"runtime"
+	"sync/atomic"
 	"time"
 
 	"m31labs.dev/tymbal"
@@ -22,6 +24,10 @@ func main() {
 	switch os.Args[1] {
 	case "loopback":
 		err = loopback(os.Args[2:])
+	case "soak":
+		err = runLoopback(os.Args[2:], true)
+	case "__native-load":
+		err = nativeLoad(os.Args[2:])
 	case "devices":
 		err = devices()
 	case "report":
@@ -45,10 +51,12 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: tymbal <command> [options]")
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  devices                 list platform and virtual devices")
-	fmt.Fprintln(w, "  loopback [options]      run the deterministic FakeHost conformance harness")
+	fmt.Fprintln(w, "  loopback [options]      run fake (default) or explicit native duplex loopback")
+	fmt.Fprintln(w, "  soak [options]          native loopback; defaults to -dur 1h -load cpu,gc")
 	fmt.Fprintln(w, "  report report.json...   print report records as a Markdown table")
 	fmt.Fprintln(w, "  tone [options]          play a sine tone on a platform or fake host")
 	fmt.Fprintln(w, "Loopback options: -rate 48000 -period 128 -periods 2 -dur 1s -delay-periods 2 -dropout -json report.json")
+	fmt.Fprintln(w, "Native loopback: -host alsa|wasapi -out ID -in ID -channels 1 -max-delay-periods N -load cpu,gc -exclusive")
 	fmt.Fprintln(w, "Tone options: -host alsa|wasapi|fake -device ID -rate 48000 -period 256 -periods 2 -channels 2 -freq 997 -dur 10s -exclusive")
 }
 
@@ -177,17 +185,33 @@ func tone(args []string) error {
 	}
 }
 
-func loopback(args []string) error {
-	fs := flag.NewFlagSet("loopback", flag.ContinueOnError)
+func loopback(args []string) error { return runLoopback(args, false) }
+
+func runLoopback(args []string, soak bool) error {
+	name, defaultLoad, defaultHost := "loopback", "", "fake"
+	defaultDuration := time.Second
+	if soak {
+		name, defaultLoad, defaultHost = "soak", "cpu,gc", ""
+		defaultDuration = time.Hour
+	}
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	hostName := fs.String("host", defaultHost, "host name; soak requires an explicit native host")
+	outputID := fs.String("out", "", "enumerated output endpoint ID (required for native runs)")
+	inputID := fs.String("in", "", "enumerated input endpoint ID (required for native runs)")
+	channels := fs.Int("channels", 1, "input and output channels")
+	outChannels := fs.Int("out-channels", 0, "output channels; zero uses -channels")
+	inChannels := fs.Int("in-channels", 0, "input channels; zero uses -channels")
+	exclusive := fs.Bool("exclusive", false, "request exclusive endpoint access")
+	maxDelay := fs.Int("max-delay-periods", 0, "native latency search bound; zero uses at least 250 ms")
 	rate := fs.Int("rate", 48_000, "sample rate in Hz")
 	period := fs.Int("period", 128, "frames per callback")
 	periods := fs.Int("periods", 2, "buffer depth in periods")
-	duration := fs.Duration("dur", time.Second, "continuity run duration")
+	duration := fs.Duration("dur", defaultDuration, "continuity run duration")
 	delay := fs.Int("delay-periods", 2, "virtual loopback delay in periods")
 	dropout := fs.Bool("dropout", false, "inject one virtual dropped period")
 	dropoutAt := fs.Int("dropout-at", 0, "period for the injected dropout")
-	load := fs.String("load", "", "comma-separated virtual load generators: cpu,gc")
+	load := fs.String("load", defaultLoad, "comma-separated load generators: cpu,gc; native runs use a child process")
 	jsonPath := fs.String("json", "", "write the JSON report to this path")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -195,15 +219,74 @@ func loopback(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	cfg := tymbal.Config{SampleRate: *rate, Period: *period, Periods: *periods}
+	if soak && (*hostName == "" || *hostName == "fake") {
+		return fmt.Errorf("soak requires an explicit native -host and -out/-in endpoint IDs")
+	}
+	if *outChannels == 0 {
+		*outChannels = *channels
+	}
+	if *inChannels == 0 {
+		*inChannels = *channels
+	}
+	cfg := tymbal.Config{SampleRate: *rate, Period: *period, Periods: *periods, OutChannels: *outChannels, InChannels: *inChannels, Exclusive: *exclusive}
 	opts := tymbaltest.LoopbackOptions{
-		Duration: *duration, DelayPeriods: *delay,
+		Duration: *duration, DelayPeriods: *delay, MaxDelayPeriods: *maxDelay,
 		InjectDropout: *dropout, InjectDropoutAtPeriod: *dropoutAt,
 		Load: splitLoad(*load),
 	}
-	record, err := tymbaltest.FakeLoopback(cfg, opts)
-	if err != nil {
-		return err
+	var record tymbaltest.Report
+	var runErr error
+	if *hostName == "fake" {
+		if *exclusive || *outChannels <= 0 || *inChannels <= 0 {
+			return fmt.Errorf("invalid or unsupported fake loopback channel/access request")
+		}
+		if *outputID == "" && *inputID == "" {
+			record, runErr = tymbaltest.FakeLoopback(cfg, opts)
+		} else {
+			host, _ := tymbaltest.NewFakeHost(tymbaltest.FakeConfig{Manual: true, Loopback: true})
+			out, in, err := loopbackEndpoints(host, *outputID, *inputID)
+			if err != nil {
+				return err
+			}
+			record, runErr = tymbaltest.Loopback(out, in, cfg, opts)
+		}
+	} else {
+		// Virtual-only flags cannot be silently accepted by a physical run.
+		var virtualFlag string
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "delay-periods" || f.Name == "dropout" || f.Name == "dropout-at" {
+				virtualFlag = f.Name
+			}
+		})
+		if virtualFlag != "" {
+			return fmt.Errorf("-%s is only supported with -host fake", virtualFlag)
+		}
+		var host tymbal.Host
+		for _, candidate := range tymbal.Hosts() {
+			if candidate.Name() == *hostName {
+				host = candidate
+				break
+			}
+		}
+		if host.Name() == "" {
+			return fmt.Errorf("host %q is unavailable", *hostName)
+		}
+		out, in, err := loopbackEndpoints(host, *outputID, *inputID)
+		if err != nil {
+			return err
+		}
+		nativeOpts := tymbaltest.NativeOptions{Duration: *duration, MaxDelayPeriods: *maxDelay, Load: opts.Load}
+		if len(opts.Load) > 0 {
+			executable, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			nativeOpts.LoadCommand = []string{executable, "__native-load"}
+		}
+		record, runErr = tymbaltest.NativeLoopback(host, out, in, cfg, nativeOpts)
+	}
+	if runErr != nil && record.Host == "" {
+		return runErr
 	}
 	if *jsonPath != "" {
 		file, err := os.Create(*jsonPath)
@@ -222,10 +305,88 @@ func loopback(args []string) error {
 	if err := tymbaltest.WriteReport(os.Stdout, record); err != nil {
 		return err
 	}
+	if runErr != nil {
+		return runErr
+	}
 	if !record.Passed {
-		return fmt.Errorf("virtual conformance checks did not pass")
+		if record.Host == "fake" {
+			return fmt.Errorf("virtual conformance checks did not pass")
+		}
+		return fmt.Errorf("native loopback checks did not pass")
 	}
 	return nil
+}
+
+func loopbackEndpoints(host tymbal.Host, outputID, inputID string) (tymbal.Device, tymbal.Device, error) {
+	if outputID == "" || inputID == "" {
+		return tymbal.Device{}, tymbal.Device{}, fmt.Errorf("loopback requires explicit -out and -in endpoint IDs")
+	}
+	devices, err := host.Devices()
+	if err != nil {
+		return tymbal.Device{}, tymbal.Device{}, err
+	}
+	var out, in tymbal.Device
+	for _, device := range devices {
+		if device.ID == outputID && device.Outputs > 0 {
+			out = device
+		}
+		if device.ID == inputID && device.Inputs > 0 {
+			in = device
+		}
+	}
+	if out.ID == "" || in.ID == "" {
+		return out, in, fmt.Errorf("host %q has no usable output/input pair %q/%q", host.Name(), outputID, inputID)
+	}
+	return out, in, nil
+}
+
+// nativeLoad runs only in a separate CLI process. Its allocations and GC never
+// share the audio engine's Go runtime. The parent kills and reaps this worker.
+var nativeGCSink []byte // forces the child worker's allocation onto the heap
+
+func nativeLoad(args []string) error {
+	fs := flag.NewFlagSet("__native-load", flag.ContinueOnError)
+	load := fs.String("load", "", "cpu,gc")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	kinds := splitLoad(*load)
+	if fs.NArg() != 0 || len(kinds) == 0 {
+		return fmt.Errorf("load worker requires cpu or gc")
+	}
+	for _, kind := range kinds {
+		if kind != "cpu" && kind != "gc" {
+			return fmt.Errorf("unsupported load %q", kind)
+		}
+	}
+	var sink atomic.Uint64
+	for _, kind := range kinds {
+		switch kind {
+		case "cpu":
+			for i := 0; i < runtime.NumCPU(); i++ {
+				go func(seed uint64) {
+					x := seed + 1
+					for {
+						for j := 0; j < 4096; j++ {
+							x = x*6364136223846793005 + 1
+						}
+						sink.Store(x)
+					}
+				}(uint64(i))
+			}
+		case "gc":
+			go func() {
+				for {
+					nativeGCSink = make([]byte, 32*1024)
+					sink.Add(uint64(len(nativeGCSink)))
+					runtime.GC()
+				}
+			}()
+		}
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func report(args []string) error {

@@ -185,7 +185,12 @@ func (h *host) Default(dir uint8) (driver.Info, error) {
 // Watch is a no-op until this backend registers an IMMNotificationClient.
 func (h *host) Watch(_ func(driver.Event)) func() { return func() {} }
 
-func (h *host) Open(req driver.Request) (driver.Stream, error) { return openRenderStream(req) }
+func (h *host) Open(req driver.Request) (driver.Stream, error) {
+	if req.Input != nil {
+		return openCaptureStream(req)
+	}
+	return openRenderStream(req)
+}
 
 func withSTA[T any](fn func() (T, error)) (T, error) {
 	type result struct {
@@ -439,49 +444,57 @@ func initializeSTA() error {
 func uninitializeCOM() { procCoUninitialize.Call() }
 
 // comMethod and the fixed-arity call helpers avoid building an argument slice.
-// They are suitable for the real-time stream path. Callers must keep Go memory
-// passed by address alive through each call.
+// uintptr arguments may carry Go pointers, so the compiler must keep that
+// memory at a stable address through each call. Hot-path callers use scratch
+// fields in their already allocated stream rather than stack-local outputs.
 func comMethod(object uintptr, slot int) uintptr {
 	vtable := *(*uintptr)(unsafe.Pointer(object))
 	return *(*uintptr)(unsafe.Pointer(vtable + uintptr(slot)*unsafe.Sizeof(uintptr(0))))
 }
 
+//go:uintptrescapes
 func comCall0(object uintptr, slot int) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall1(object uintptr, slot int, a0 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall2(object uintptr, slot int, a0, a1 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0, a1)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall3(object uintptr, slot int, a0, a1, a2 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0, a1, a2)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall4(object uintptr, slot int, a0, a1, a2, a3 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0, a1, a2, a3)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall5(object uintptr, slot int, a0, a1, a2, a3, a4 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0, a1, a2, a3, a4)
 	runtime.KeepAlive(object)
 	return hr
 }
 
+//go:uintptrescapes
 func comCall6(object uintptr, slot int, a0, a1, a2, a3, a4, a5 uintptr) uintptr {
 	hr, _, _ := syscall.SyscallN(comMethod(object, slot), object, a0, a1, a2, a3, a4, a5)
 	runtime.KeepAlive(object)

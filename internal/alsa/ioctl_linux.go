@@ -51,3 +51,15 @@ func ioctl(fd int, request uintptr, arg unsafe.Pointer) error {
 	}
 	return nil
 }
+
+// LINK takes a scalar descriptor, unlike pointer-based PCM ioctls, despite
+// being encoded as _IOW in the ALSA ABI.
+//
+//tymbal:rt
+func linkPCM(fd, otherFD int) error {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), ioctlPCMLink, uintptr(otherFD))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}

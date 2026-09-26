@@ -1,0 +1,36 @@
+name: ALSA Linux guest
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  alsa-guest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install guest runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            acl busybox-static kmod qemu-system-x86 virtme-ng
+      - name: Allow the runner user to access KVM
+        run: |
+          if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+      - name: Run ALSA ioctl and loopback smoke in KVM guest
+        run: |
+          scripts/alsa-guest.sh \
+            --duration 2s \
+            --loopback-duration 60s \
+            --log "$RUNNER_TEMP/tymbal-alsa-guest.log" \
+            --report "$RUNNER_TEMP/tymbal-alsa-loopback.json"

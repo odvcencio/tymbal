@@ -375,7 +375,7 @@ func (s *Stream) Close() error {
 	if started {
 		<-done
 	}
-	closeErr := s.device.Close()
+	closeErr := mapBackendError(s.device.Close())
 	s.mu.Lock()
 	s.closeErr = closeErr
 	s.state = stateClosed
@@ -421,6 +421,7 @@ func (s *Stream) run() {
 	s.actual.Priority = grant.String()
 	s.mu.Unlock()
 	if err := s.device.Start(); err != nil {
+		err = mapBackendError(err)
 		s.mu.Lock()
 		s.startErr = err
 		s.mu.Unlock()
@@ -463,6 +464,7 @@ func (s *Stream) setFailure(err error) {
 	if err == nil {
 		return
 	}
+	err = mapBackendError(err)
 	s.mu.Lock()
 	if s.terminalErr == nil {
 		s.terminalErr = err

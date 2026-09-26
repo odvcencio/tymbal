@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -60,6 +61,7 @@ type pcmEndpoint struct {
 }
 
 type pcmOps struct {
+	link  func(fd, otherFD int) error
 	ioctl func(fd int, request uintptr, arg unsafe.Pointer) error
 	ppoll func(fds *[3]pcmPollFD, count int) (int, syscall.Errno)
 }
@@ -82,7 +84,6 @@ type pcmStream struct {
 	clockTS     pcmTimespec
 	outDelay    int64
 	inDelay     int64
-	linkFD      int32
 	tstampMode  int32
 	readByte    [1]byte
 
@@ -107,14 +108,14 @@ type pcmStream struct {
 // success it takes ownership of outFD and inFD. On failure the caller retains
 // both file descriptors and must close them.
 func openPCMStream(outFD, inFD int, outP, inP pcmParams) (*pcmStream, error) {
-	return newPCMStream(outFD, inFD, outP, inP, pcmOps{ioctl: ioctl, ppoll: pcmPPoll}, true)
+	return newPCMStream(outFD, inFD, outP, inP, pcmOps{ioctl: ioctl, link: linkPCM, ppoll: pcmPPoll}, true)
 }
 
 func newPCMStream(outFD, inFD int, outP, inP pcmParams, ops pcmOps, owned bool) (*pcmStream, error) {
 	if outFD < 0 && inFD < 0 {
 		return nil, errPCMNoDevice
 	}
-	if ops.ioctl == nil || ops.ppoll == nil {
+	if ops.ioctl == nil || ops.ppoll == nil || (outFD >= 0 && inFD >= 0 && ops.link == nil) {
 		return nil, fmt.Errorf("alsa: missing PCM system call implementation")
 	}
 
@@ -287,8 +288,7 @@ func (s *pcmStream) Start() error {
 		}
 	}
 	if s.hasOut && s.hasIn {
-		s.linkFD = int32(s.in.fd)
-		if err := s.ops.ioctl(s.out.fd, ioctlPCMLink, unsafe.Pointer(&s.linkFD)); err != nil {
+		if err := s.ops.link(s.out.fd, s.in.fd); err != nil {
 			return s.mapOperationError(err)
 		}
 		s.linked = true
@@ -752,8 +752,9 @@ func saturatingIncrement(v *uint64) {
 
 //tymbal:rt
 func pcmPPoll(fds *[3]pcmPollFD, count int) (int, syscall.Errno) {
-	r, _, errno := syscall.RawSyscall6(syscall.SYS_PPOLL,
+	r, _, errno := syscall.Syscall6(syscall.SYS_PPOLL,
 		uintptr(unsafe.Pointer(&fds[0])), uintptr(count), 0, 0, pcmKernelSigsetSize, 0)
+	runtime.KeepAlive(fds)
 	if errno != 0 {
 		return int(r), errno
 	}

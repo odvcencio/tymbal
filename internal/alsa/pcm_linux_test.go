@@ -3,7 +3,12 @@
 package alsa
 
 import (
+	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -44,7 +49,15 @@ type fakePCM struct {
 }
 
 func (f *fakePCM) ops() pcmOps {
-	return pcmOps{ioctl: f.ioctl, ppoll: f.ppoll}
+	return pcmOps{ioctl: f.ioctl, link: f.link, ppoll: f.ppoll}
+}
+
+func (f *fakePCM) link(fd, otherFD int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.links++
+	f.calls = append(f.calls, pcmTestCall{fd: fd, request: ioctlPCMLink, buf: uintptr(otherFD)})
+	return nil
 }
 
 func (f *fakePCM) ioctl(fd int, request uintptr, arg unsafe.Pointer) error {
@@ -110,8 +123,6 @@ func (f *fakePCM) ioctl(fd int, request uintptr, arg unsafe.Pointer) error {
 		}
 	case ioctlPCMStart:
 		f.starts++
-	case ioctlPCMLink:
-		f.links++
 	case ioctlPCMDrop:
 		f.drops++
 	case ioctlPCMDelay:
@@ -283,6 +294,9 @@ func TestPCMDuplexLinksBeforePrimingAndRunsBothSides(t *testing.T) {
 	for i, call := range fake.calls {
 		if call.request == ioctlPCMLink && linkIndex < 0 {
 			linkIndex = i
+			if call.fd != 103 || call.buf != 104 {
+				t.Fatalf("LINK descriptors = %d/%d, want 103/104", call.fd, call.buf)
+			}
 		}
 		if call.request == ioctlPCMWriteI && firstWrite < 0 {
 			firstWrite = i
@@ -416,6 +430,42 @@ func TestPCMResumeRetriesEAGAINThenRecovers(t *testing.T) {
 }
 
 func TestPCMInterruptWakesBlockedWait(t *testing.T) {
+	pcmTestInterruptWakesBlockedWait(t)
+}
+
+func TestPCMInterruptWakesBlockedWaitWithSingleP(t *testing.T) {
+	const childEnv = "TYMBAL_PCM_SINGLE_P_CHILD"
+	if os.Getenv(childEnv) == "1" {
+		pcmTestInterruptWakesBlockedWait(t)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPCMInterruptWakesBlockedWaitWithSingleP$")
+	cmd.Env = pcmSinglePChildEnv(os.Environ(), childEnv)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("single-P PPOLL subprocess timed out; blocked PPOLL may be retaining the P: %s", output)
+	}
+	if err != nil {
+		t.Fatalf("single-P PPOLL subprocess failed: %v\n%s", err, output)
+	}
+}
+
+func pcmSinglePChildEnv(env []string, childEnv string) []string {
+	filtered := make([]string, 0, len(env)+3)
+	for _, item := range env {
+		if strings.HasPrefix(item, "GOMAXPROCS=") || strings.HasPrefix(item, "GODEBUG=") || strings.HasPrefix(item, childEnv+"=") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return append(filtered, "GOMAXPROCS=1", "GODEBUG=asyncpreemptoff=1", childEnv+"=1")
+}
+
+func pcmTestInterruptWakesBlockedWait(t *testing.T) {
+	t.Helper()
 	var pipe [2]int
 	if err := syscall.Pipe2(pipe[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		t.Fatal(err)
@@ -440,9 +490,15 @@ func TestPCMInterruptWakesBlockedWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	waited := make(chan error, 1)
-	go func() { waited <- s.Wait() }()
-	<-entered
-	s.Interrupt()
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		waited <- s.Wait()
+	}()
+	go func() {
+		<-entered
+		s.Interrupt()
+	}()
 	select {
 	case err := <-waited:
 		if !errors.Is(err, driver.ErrInterrupted) {

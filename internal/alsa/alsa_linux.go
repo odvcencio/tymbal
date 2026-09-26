@@ -13,18 +13,25 @@ import (
 	"m31labs.dev/tymbal/internal/driver"
 )
 
-type backend struct{}
+type backend struct {
+	capMu sync.Mutex
+	caps  map[string]pcmCapability
+}
 
 // New constructs the direct ALSA hardware backend. It does not open a device.
-func New() driver.Driver { return backend{} }
+func New() driver.Driver { return &backend{} }
 
-func (backend) Name() string { return "alsa" }
+func (*backend) Name() string { return "alsa" }
 
-func (backend) Devices() ([]driver.Info, error) {
+func (b *backend) Devices() ([]driver.Info, error) {
 	endpoints, err := discoverEndpoints()
 	if err != nil {
 		return nil, err
 	}
+	return b.devicesWithProbe(endpoints, probePCM)
+}
+
+func (b *backend) devicesWithProbe(endpoints []endpoint, probe func(string) (pcmCapability, error)) ([]driver.Info, error) {
 	sort.Slice(endpoints, func(i, j int) bool {
 		if endpoints[i].cardNumber != endpoints[j].cardNumber {
 			return endpoints[i].cardNumber < endpoints[j].cardNumber
@@ -39,11 +46,8 @@ func (backend) Devices() ([]driver.Info, error) {
 			info.Name = endpoint.cardName
 		}
 		if endpoint.playback {
-			capability, err := probePCM(endpoint.pcmPath(false))
+			capability, err := b.capability(endpoint, false, probe)
 			if err != nil {
-				if errors.Is(err, syscall.EBUSY) {
-					return nil, fmt.Errorf("%w: ALSA playback %s", driver.ErrBusy, info.ID)
-				}
 				return nil, fmt.Errorf("alsa: probe playback %s: %w", info.ID, err)
 			}
 			info.Outputs = capability.channels
@@ -55,11 +59,8 @@ func (backend) Devices() ([]driver.Info, error) {
 			}
 		}
 		if endpoint.capture {
-			capability, err := probePCM(endpoint.pcmPath(true))
+			capability, err := b.capability(endpoint, true, probe)
 			if err != nil {
-				if errors.Is(err, syscall.EBUSY) {
-					return nil, fmt.Errorf("%w: ALSA capture %s", driver.ErrBusy, info.ID)
-				}
 				return nil, fmt.Errorf("alsa: probe capture %s: %w", info.ID, err)
 			}
 			info.Inputs = capability.channels
@@ -91,7 +92,37 @@ func (backend) Devices() ([]driver.Info, error) {
 	return devices, nil
 }
 
-func (b backend) Default(dir uint8) (driver.Info, error) {
+// capability retains the last successful probe while a PCM is in use. If it
+// has never been probed, control metadata still establishes the direction but
+// not its capacity: advertise one channel and leave rate/period limits unknown.
+// Open always negotiates the requested channels with the kernel.
+func (b *backend) capability(e endpoint, capture bool, probe func(string) (pcmCapability, error)) (pcmCapability, error) {
+	capability, err := probe(e.pcmPath(capture))
+	if err != nil && !errors.Is(err, syscall.EBUSY) {
+		return pcmCapability{}, err
+	}
+	key := e.id()
+	if capture {
+		key += ":capture"
+	} else {
+		key += ":playback"
+	}
+	b.capMu.Lock()
+	defer b.capMu.Unlock()
+	if err == nil {
+		if b.caps == nil {
+			b.caps = make(map[string]pcmCapability)
+		}
+		b.caps[key] = capability
+		return capability, nil
+	}
+	if cached, ok := b.caps[key]; ok {
+		return cached, nil
+	}
+	return pcmCapability{channels: 1}, nil
+}
+
+func (b *backend) Default(dir uint8) (driver.Info, error) {
 	if dir != 1 && dir != 2 {
 		return driver.Info{}, fmt.Errorf("alsa: invalid direction %d", dir)
 	}
@@ -109,7 +140,7 @@ func (b backend) Default(dir uint8) (driver.Info, error) {
 
 // Watch polls card-control metadata off the audio path. It does not open PCM
 // endpoints, which can be busy while an active stream is running.
-func (backend) Watch(fn func(driver.Event)) (stop func()) {
+func (*backend) Watch(fn func(driver.Event)) (stop func()) {
 	if fn == nil {
 		return func() {}
 	}
@@ -221,7 +252,7 @@ func probePCM(path string) (pcmCapability, error) {
 	return capability, nil
 }
 
-func (backend) Open(req driver.Request) (_ driver.Stream, returnedErr error) {
+func (*backend) Open(req driver.Request) (_ driver.Stream, returnedErr error) {
 	defer func() {
 		if returnedErr == nil {
 			return
@@ -302,4 +333,4 @@ func (backend) Open(req driver.Request) (_ driver.Stream, returnedErr error) {
 	return stream, nil
 }
 
-var _ driver.Driver = backend{}
+var _ driver.Driver = (*backend)(nil)

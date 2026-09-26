@@ -79,8 +79,10 @@ type wasapiStream struct {
 	render         uintptr
 	audioEvent     uintptr
 	interruptEvent uintptr
+	waitProc       uintptr
 	waitHandles    [2]uintptr
 	bufferFrames   uint32
+	renderBuffer   uintptr // reusable COM output slot; its address stays off the stack
 
 	comInitialized bool
 	clientStarted  bool
@@ -356,6 +358,7 @@ func createStreamEvents(s *wasapiStream) error {
 	s.interruptMu.Lock()
 	s.interruptEvent = interrupt
 	s.interruptMu.Unlock()
+	s.waitProc = procWaitForMultipleObjects.Addr()
 	s.waitHandles = [2]uintptr{audio, interrupt}
 	if s.interruptRequested.Load() {
 		_ = signalEvent(interrupt)
@@ -372,7 +375,8 @@ func (s *wasapiStream) Wait() error {
 		return driver.ErrInterrupted
 	}
 	s.ready = false
-	result, _, callErr := procWaitForMultipleObjects.Call(
+	result, _, callErr := syscall.SyscallN(
+		s.waitProc,
 		2,
 		uintptr(unsafe.Pointer(&s.waitHandles[0])),
 		0,
@@ -390,7 +394,7 @@ func (s *wasapiStream) Wait() error {
 		return driver.ErrInterrupted
 	}
 	if result == waitFailed {
-		if callErr == nil {
+		if callErr == 0 {
 			callErr = syscall.EINVAL
 		}
 		return fmt.Errorf("tymbal wasapi: wait for render event: %w", callErr)
@@ -413,9 +417,9 @@ func (s *wasapiStream) Commit() error {
 	if !s.ready || s.render == 0 {
 		return fmt.Errorf("tymbal wasapi: commit without a render event")
 	}
-	var native uintptr
-	hr := comCall2(s.render, audioRenderClientGetBuffer, uintptr(s.params.Period), uintptr(unsafe.Pointer(&native)))
-	runtime.KeepAlive(&native)
+	s.renderBuffer = 0
+	hr := comCall2(s.render, audioRenderClientGetBuffer, uintptr(s.params.Period), uintptr(unsafe.Pointer(&s.renderBuffer)))
+	runtime.KeepAlive(s)
 	if err := renderHRESULT("IAudioRenderClient.GetBuffer", hr); err != nil {
 		if errors.Is(err, driver.ErrXrun) {
 			s.dropouts++
@@ -423,11 +427,11 @@ func (s *wasapiStream) Commit() error {
 		s.ready = false
 		return err
 	}
-	if native == 0 {
+	if s.renderBuffer == 0 {
 		s.ready = false
 		return fmt.Errorf("tymbal wasapi: render buffer returned nil")
 	}
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(native)), len(s.out)), s.out)
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(s.renderBuffer)), len(s.out)), s.out)
 	runtime.KeepAlive(s.out)
 	hr = comCall2(s.render, audioRenderClientReleaseBuffer, uintptr(s.params.Period), 0)
 	if err := renderHRESULT("IAudioRenderClient.ReleaseBuffer", hr); err != nil {

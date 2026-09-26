@@ -1,5 +1,4 @@
-// Package rt contains portable real-time helpers. Platform priority and
-// memory-locking support is added by the native backend milestones.
+// Package rt contains portable real-time helpers and platform thread priority.
 package rt
 
 import (
@@ -17,6 +16,7 @@ var ErrUnsupported = errors.New("tymbal rt: unsupported on this build")
 type Grant struct {
 	Kind     string
 	Priority int
+	restore  func()
 }
 
 func (g Grant) String() string {
@@ -29,12 +29,16 @@ func (g Grant) String() string {
 	return g.Kind + " " + itoa(g.Priority)
 }
 
-// Raise attempts to raise priority on the calling thread. The portable M0
-// implementation reports normal priority and never changes process policy.
-func Raise(_ time.Duration) Grant { return Grant{Kind: "normal"} }
+// Raise attempts to raise priority on the calling, locked OS thread. Failure
+// is nonfatal. The caller must keep the thread locked until after Lower.
+func Raise(period time.Duration) Grant { return raisePriority(period) }
 
-// Lower restores any priority change made by Raise. M0 has no such changes.
-func Lower(_ Grant) {}
+// Lower restores the thread's previous priority before UnlockOSThread.
+func Lower(g Grant) {
+	if g.restore != nil {
+		g.restore()
+	}
+}
 
 // PreGrowStack is reserved for measured backend-specific stack preparation.
 func PreGrowStack() {}
