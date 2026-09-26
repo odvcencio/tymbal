@@ -56,6 +56,7 @@ const (
 	audclntErrDeviceInvalidated = 0x88890004
 	audclntShareModeShared      = 0
 	audclntStreamEventCallback  = 0x00040000
+	audclntStreamLoopback       = 0x00020000
 	audclntBufferFlagSilent     = 0x00000002
 )
 
@@ -186,6 +187,9 @@ func (h *host) Default(dir uint8) (driver.Info, error) {
 func (h *host) Watch(fn func(driver.Event)) func() { return watchEndpoints(fn) }
 
 func (h *host) Open(req driver.Request) (driver.Stream, error) {
+	if req.Input != nil && req.Output != nil {
+		return openDuplexStream(req)
+	}
 	if req.Input != nil {
 		return openCaptureStream(req)
 	}

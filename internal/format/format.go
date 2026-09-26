@@ -24,6 +24,8 @@ var (
 )
 
 // BytesPerSample returns the encoded width of f, or zero for an unknown format.
+//
+//tymbal:rt
 func BytesPerSample(f Format) int {
 	switch f {
 	case F32LE, S32LE:
@@ -39,6 +41,8 @@ func BytesPerSample(f Format) int {
 
 // Encode converts one channel of samples into little-endian device bytes.
 // dst must have exactly len(src)*BytesPerSample(f) bytes.
+//
+//tymbal:rt
 func Encode(dst []byte, src []float32, f Format) error {
 	bps := BytesPerSample(f)
 	if bps == 0 {
@@ -56,6 +60,8 @@ func Encode(dst []byte, src []float32, f Format) error {
 // Decode converts one channel of little-endian device bytes into float32
 // samples. Integer formats are normalized by their negative full-scale value.
 // dst must have exactly len(src)/BytesPerSample(f) samples.
+//
+//tymbal:rt
 func Decode(dst []float32, src []byte, f Format) error {
 	bps := BytesPerSample(f)
 	if bps == 0 {
@@ -73,6 +79,8 @@ func Decode(dst []float32, src []byte, f Format) error {
 // EncodeInterleaved converts planar channels to interleaved device bytes.
 // Every channel must have the same frame count, and dst must have exactly the
 // size required by the channel and frame counts.
+//
+//tymbal:rt
 func EncodeInterleaved(dst []byte, planar [][]float32, f Format) error {
 	bps := BytesPerSample(f)
 	if bps == 0 {
@@ -105,6 +113,8 @@ func EncodeInterleaved(dst []byte, planar [][]float32, f Format) error {
 // DecodeInterleaved de-interleaves device bytes into planar channels. Every
 // destination channel must have the same frame count, and src must have
 // exactly the required byte length.
+//
+//tymbal:rt
 func DecodeInterleaved(planar [][]float32, src []byte, f Format) error {
 	bps := BytesPerSample(f)
 	if bps == 0 {
@@ -134,6 +144,7 @@ func DecodeInterleaved(planar [][]float32, src []byte, f Format) error {
 	return nil
 }
 
+//tymbal:rt
 func encodeSample(dst []byte, off int, x float32, f Format) {
 	switch f {
 	case F32LE:
@@ -164,6 +175,7 @@ func encodeSample(dst []byte, off int, x float32, f Format) {
 	}
 }
 
+//tymbal:rt
 func integerSample(x float32, scale, min, max float64) int64 {
 	v := float64(x)
 	if math.IsNaN(v) {
@@ -184,6 +196,7 @@ func integerSample(x float32, scale, min, max float64) int64 {
 	return int64(v)
 }
 
+//tymbal:rt
 func decodeSample(src []byte, off int, f Format) float32 {
 	switch f {
 	case F32LE:

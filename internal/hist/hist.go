@@ -16,6 +16,8 @@ type Histogram struct{ Buckets [32]uint64 }
 
 // Record adds one observation. Negative and sub-microsecond durations use
 // bucket 0. Counters saturate at MaxUint64 instead of wrapping.
+//
+//tymbal:rt
 func (h *Histogram) Record(d time.Duration) {
 	bucket := 0
 	if d >= time.Microsecond {
@@ -96,6 +98,7 @@ func bucketUpperBound(i int) time.Duration {
 	return time.Duration(uint64(1)<<uint(i)) * time.Microsecond
 }
 
+//tymbal:rt
 func saturatingIncrement(p *uint64) {
 	old := atomic.LoadUint64(p)
 	for old != math.MaxUint64 {

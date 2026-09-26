@@ -54,6 +54,8 @@ func growStack() {
 }
 
 // Now returns nanoseconds from a process-local monotonic clock origin.
+//
+//tymbal:rt
 func Now() int64 { return time.Since(processStart).Nanoseconds() }
 
 // LockProcessMemory is an opt-in engine-process tactic. M0 does not implement
