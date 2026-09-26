@@ -118,7 +118,7 @@ func TestNativeExclusiveRenderLifecycle(t *testing.T) {
 		if devices[i].Outputs == 0 || len(devices[i].SampleRates) == 0 {
 			continue
 		}
-		if strings.Contains(strings.ToLower(devices[i].Name), "nvidia") {
+		if output == nil || devices[i].Default == 1 {
 			output = &devices[i]
 			if devices[i].Default == 1 {
 				break
@@ -126,7 +126,7 @@ func TestNativeExclusiveRenderLifecycle(t *testing.T) {
 		}
 	}
 	if output == nil {
-		t.Fatal("TYMBAL_REQUIRE_EXCLUSIVE_RENDER=1 but Windows exposes no active NVIDIA render endpoint")
+		t.Fatal("TYMBAL_REQUIRE_EXCLUSIVE_RENDER=1 but Windows exposes no active render endpoint")
 	}
 
 	done := make(chan error, 1)
