@@ -25,6 +25,8 @@ type LoopbackOptions struct {
 	MaxDelayPeriods       int
 	InjectDropout         bool
 	InjectDropoutAtPeriod int
+	InjectStallAtPeriod   int
+	StallDuration         time.Duration
 	Seed                  int64
 }
 
@@ -64,6 +66,9 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 	if opts.Seed == 0 {
 		opts.Seed = 1
 	}
+	if opts.StallDuration < 0 || opts.StallDuration > 0 && opts.InjectDropout {
+		return Report{}, fmt.Errorf("tymbaltest: use one nonnegative fault injection")
+	}
 	stopLoad, err := startLoad(opts.Load)
 	if err != nil {
 		return Report{}, err
@@ -90,7 +95,7 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 		}
 		captureInput(probeCapture, frame, input)
 	}
-	_, latencyActual, err := runManualFake(out, in, cfg, delayPeriods, probeFrames/cfg.Period, probeCallback, nil)
+	_, latencyActual, err := runManualFake(out, in, cfg, delayPeriods, probeFrames/cfg.Period, probeCallback, nil, 0)
 	if err != nil {
 		return Report{}, fmt.Errorf("latency pass: %w", err)
 	}
@@ -111,6 +116,9 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 			opts.InjectDropoutAtPeriod = lastPeriod
 		}
 	}
+	if opts.StallDuration > 0 && opts.InjectStallAtPeriod <= 0 {
+		opts.InjectStallAtPeriod = delayPeriods + 24
+	}
 	capture := make([]float32, continuousFrames)
 	gen := NewSine(cfg.SampleRate, testToneHz, math.Pow(10, testToneDB/20))
 	callback := func(t tymbal.Time, input, output [][]float32) {
@@ -125,7 +133,14 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 		}
 		injectAt = &at
 	}
-	stats, actual, runErr := runManualFake(out, in, cfg, delayPeriods, continuousFrames/cfg.Period, callback, injectAt)
+	if opts.StallDuration > 0 {
+		if opts.InjectStallAtPeriod >= continuousFrames/cfg.Period {
+			return Report{}, fmt.Errorf("tymbaltest: stall period %d exceeds run length", opts.InjectStallAtPeriod)
+		}
+		at := opts.InjectStallAtPeriod
+		injectAt = &at
+	}
+	stats, actual, runErr := runManualFake(out, in, cfg, delayPeriods, continuousFrames/cfg.Period, callback, injectAt, opts.StallDuration)
 	if runErr != nil {
 		return Report{}, fmt.Errorf("continuity pass: %w", runErr)
 	}
@@ -133,7 +148,7 @@ func Loopback(out, in tymbal.Device, cfg tymbal.Config, opts LoopbackOptions) (R
 	reportedLatency := int(math.Round(float64(latencyActual.LatencyOut+latencyActual.LatencyIn) * float64(actual.SampleRate) / float64(time.Second)))
 	expectedBreaks := 0
 	expectedDropouts := uint64(0)
-	if opts.InjectDropout {
+	if opts.InjectDropout || opts.StallDuration > time.Duration(cfg.Period)*time.Second/time.Duration(cfg.SampleRate) {
 		expectedBreaks = 1
 		expectedDropouts = 1
 	}
@@ -196,7 +211,7 @@ func FakeLoopback(cfg tymbal.Config, opts LoopbackOptions) (Report, error) {
 	return Report{}, ErrNoFakeDevice
 }
 
-func runManualFake(out, in tymbal.Device, cfg tymbal.Config, delay, periods int, cb tymbal.Callback, dropoutAt *int) (tymbal.Stats, tymbal.Actual, error) {
+func runManualFake(out, in tymbal.Device, cfg tymbal.Config, delay, periods int, cb tymbal.Callback, faultAt *int, stall time.Duration) (tymbal.Stats, tymbal.Actual, error) {
 	fakeDevices := []tymbal.Device{out}
 	if in.ID != out.ID {
 		fakeDevices = append(fakeDevices, in)
@@ -227,8 +242,12 @@ func runManualFake(out, in tymbal.Device, cfg tymbal.Config, delay, periods int,
 		_ = stream.Close()
 		return tymbal.Stats{}, actual, err
 	}
-	if dropoutAt != nil {
-		control.InjectDropout(*dropoutAt)
+	if faultAt != nil {
+		if stall > 0 {
+			control.InjectStall(*faultAt, stall)
+		} else {
+			control.InjectDropout(*faultAt)
+		}
 	}
 	advanceErr := control.Advance(periods)
 	stopErr := stream.Stop()

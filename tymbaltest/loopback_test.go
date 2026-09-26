@@ -36,7 +36,11 @@ func TestFakeLoopbackDeterministicFaultMatrix(t *testing.T) {
 		return state
 	}
 	periods := []int{128, 256}
-	for caseIndex := 0; caseIndex < 8; caseIndex++ {
+	cases := 1_000
+	if testing.Short() {
+		cases = 64
+	}
+	for caseIndex := 0; caseIndex < cases; caseIndex++ {
 		period := periods[int(next()%uint64(len(periods)))]
 		delay := 1 + int(next()%4)
 		channels := 1 + int(next()%2)
@@ -46,13 +50,25 @@ func TestFakeLoopbackDeterministicFaultMatrix(t *testing.T) {
 			OutChannels: channels, InChannels: channels,
 		}, LoopbackOptions{
 			Duration: 500 * time.Millisecond, DelayPeriods: delay,
-			InjectDropout: true, InjectDropoutAtPeriod: faultAt, Seed: seed,
+			InjectStallAtPeriod: faultAt,
+			StallDuration:       time.Duration(period) * time.Second / 48_000 * 3 / 2,
+			Seed:                seed,
 		})
 		if err != nil {
 			t.Fatalf("seed=%d case=%d period=%d delay=%d channels=%d fault=%d: %v", seed, caseIndex, period, delay, channels, faultAt, err)
 		}
 		if !report.Passed || report.LatencyMeasuredFrames != period*delay || report.BreaksDetected != 1 || report.DropoutsReported != 1 {
 			t.Fatalf("seed=%d case=%d period=%d delay=%d channels=%d fault=%d: report=%+v", seed, caseIndex, period, delay, channels, faultAt, report)
+		}
+		clean, err := FakeLoopback(tymbal.Config{
+			SampleRate: 48_000, Period: period, Periods: 2,
+			OutChannels: channels, InChannels: channels,
+		}, LoopbackOptions{Duration: 500 * time.Millisecond, DelayPeriods: delay, Seed: seed})
+		if err != nil {
+			t.Fatalf("seed=%d case=%d clean: %v", seed, caseIndex, err)
+		}
+		if !clean.Passed || clean.LatencyMeasuredFrames != period*delay || clean.BreaksDetected != 0 || clean.DropoutsReported != 0 {
+			t.Fatalf("seed=%d case=%d clean report=%+v", seed, caseIndex, clean)
 		}
 	}
 }
