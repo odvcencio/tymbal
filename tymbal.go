@@ -1,7 +1,7 @@
 // Package tymbal provides cgo-free native audio streams.
 //
-// The M0 implementation includes the portable stream core and a deterministic
-// fake host. Platform audio hosts are added by later milestones.
+// It includes a portable stream core, a deterministic fake host, ALSA on
+// Linux, and WASAPI on Windows.
 package tymbal
 
 import (

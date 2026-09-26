@@ -63,7 +63,8 @@ type Stream struct {
 	startDone     chan struct{}
 	done          chan struct{}
 	startErr      error // written before startDone closes
-	terminalErr   error // protected by mu; first spontaneous failure only
+	failureErr    error // written by the stream thread before failureReady
+	failureReady  atomic.Bool
 
 	stats streamStats
 }
@@ -295,7 +296,7 @@ func (s *Stream) Start() error {
 	s.mu.Lock()
 	err := s.startErr
 	s.mu.Unlock()
-	return err
+	return mapBackendError(err)
 }
 
 // Stop interrupts a blocked driver wait and waits for the stream thread to
@@ -390,10 +391,10 @@ func (s *Stream) Err() error {
 	if s == nil {
 		return nil
 	}
-	s.mu.Lock()
-	err := s.terminalErr
-	s.mu.Unlock()
-	return err
+	if !s.failureReady.Load() {
+		return nil
+	}
+	return mapBackendError(s.failureErr)
 }
 
 // Stats copies the current counters and timing histograms into dst. Passing
@@ -423,7 +424,6 @@ func (s *Stream) run() {
 	s.actual.Priority = grant.String()
 	s.mu.Unlock()
 	if err := s.device.Start(); err != nil {
-		err = mapBackendError(err)
 		s.mu.Lock()
 		s.startErr = err
 		s.mu.Unlock()
@@ -453,7 +453,7 @@ func (s *Stream) finishRun() {
 		watchdogStop()
 	}
 	s.mu.Lock()
-	if s.terminalErr != nil {
+	if s.failureReady.Load() {
 		s.state = stateFailed
 	} else {
 		s.state = stateStopped
@@ -462,18 +462,18 @@ func (s *Stream) finishRun() {
 	s.mu.Unlock()
 }
 
+//tymbal:rt
 func (s *Stream) setFailure(err error) {
 	if err == nil {
 		return
 	}
-	err = mapBackendError(err)
-	s.mu.Lock()
-	if s.terminalErr == nil {
-		s.terminalErr = err
+	if !s.failureReady.Load() {
+		s.failureErr = err
+		s.failureReady.Store(true)
 	}
-	s.mu.Unlock()
 }
 
+//tymbal:rt
 func (s *Stream) loop() {
 	lastDropouts := s.device.Dropouts()
 	var frame uint64
@@ -616,6 +616,7 @@ func (s *Stream) loop() {
 	}
 }
 
+//tymbal:rt
 func callCallback(cb Callback, t Time, in, out [][]float32) (panicked bool) {
 	defer func() {
 		if recover() != nil {
@@ -626,6 +627,7 @@ func callCallback(cb Callback, t Time, in, out [][]float32) (panicked bool) {
 	return false
 }
 
+//tymbal:rt
 func atomicSaturatingAdd(v *atomic.Uint64, delta uint64) {
 	for {
 		old := v.Load()
@@ -642,6 +644,7 @@ func atomicSaturatingAdd(v *atomic.Uint64, delta uint64) {
 	}
 }
 
+//tymbal:rt
 func atomicSaturatingMax(v *atomic.Int64, candidate int64) {
 	for {
 		old := v.Load()

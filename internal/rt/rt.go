@@ -3,6 +3,7 @@ package rt
 
 import (
 	"errors"
+	"runtime"
 	"runtime/metrics"
 	"sync"
 	"time"
@@ -40,8 +41,17 @@ func Lower(g Grant) {
 	}
 }
 
-// PreGrowStack is reserved for measured backend-specific stack preparation.
-func PreGrowStack() {}
+// PreGrowStack commits a 64 KiB frame before the callback loop starts.
+func PreGrowStack() { growStack() }
+
+//go:noinline
+func growStack() {
+	var frame [64 << 10]byte
+	for i := range frame {
+		frame[i] = byte(i)
+	}
+	runtime.KeepAlive(&frame)
+}
 
 // Now returns nanoseconds from a process-local monotonic clock origin.
 func Now() int64 { return time.Since(processStart).Nanoseconds() }
