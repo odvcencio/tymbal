@@ -100,7 +100,10 @@ type captureStream struct {
 var _ driver.Stream = (*captureStream)(nil)
 
 func openCaptureStream(req driver.Request) (driver.Stream, error) {
-	if req.Input == nil || req.Output != nil || req.Exclusive {
+	if req.Exclusive {
+		return openExclusiveCaptureStream(req)
+	}
+	if req.Input == nil || req.Output != nil {
 		return nil, driver.ErrUnsupported
 	}
 	if req.Input.ID == "" || req.InChannels <= 0 || req.SampleRate <= 0 || req.Period <= 0 || req.Periods <= 0 {

@@ -182,8 +182,8 @@ func (h *host) Default(dir uint8) (driver.Info, error) {
 	})
 }
 
-// Watch is a no-op until this backend registers an IMMNotificationClient.
-func (h *host) Watch(_ func(driver.Event)) func() { return func() {} }
+// Watch reports endpoint changes from the Core Audio notification interface.
+func (h *host) Watch(fn func(driver.Event)) func() { return watchEndpoints(fn) }
 
 func (h *host) Open(req driver.Request) (driver.Stream, error) {
 	if req.Input != nil {
@@ -366,6 +366,9 @@ func inspectEndpoint(endpoint uintptr, direction uint8) (driver.Info, error) {
 		info.Outputs = channels
 	} else {
 		info.Inputs = channels
+		// Capture is the only implemented exclusive direction. Capability probes
+		// describe exact format support; Open still negotiates device ownership.
+		info.Exclusive, _ = supportsAnyExclusiveFormat(audioClient, mixFormat, rate, channels)
 	}
 	return info, nil
 }

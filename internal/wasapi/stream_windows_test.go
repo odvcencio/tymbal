@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -109,8 +110,12 @@ func TestSharedPeriodAndBufferGeometry(t *testing.T) {
 	if err != nil || count != 2 || latency != 20*time.Millisecond {
 		t.Fatalf("bufferGeometry = (%d, %v, %v), want (2, 20ms, nil)", count, latency, err)
 	}
-	if _, _, err := bufferGeometry(1000, 480, 48000); !errors.Is(err, driver.ErrFormat) {
-		t.Fatalf("misaligned buffer geometry error = %v, want driver.ErrFormat", err)
+	count, latency, err = bufferGeometry(1056, 480, 48000)
+	if err != nil || count != 3 || latency != 22*time.Millisecond {
+		t.Fatalf("non-divisible buffer geometry = (%d, %v, %v), want (3, 22ms, nil)", count, latency, err)
+	}
+	if _, _, err := bufferGeometry(479, 480, 48000); !errors.Is(err, driver.ErrFormat) {
+		t.Fatalf("too-small buffer geometry error = %v, want driver.ErrFormat", err)
 	}
 }
 
@@ -127,6 +132,9 @@ func TestNativeSharedRenderEventAndInterrupt(t *testing.T) {
 		}
 	}
 	if output == nil {
+		if os.Getenv("TYMBAL_REQUIRE_RENDER") == "1" {
+			t.Fatal("Windows exposes no active render endpoint")
+		}
 		t.Skip("Windows exposes no active render endpoint")
 	}
 
@@ -178,11 +186,41 @@ func TestNativeSharedRenderEventAndInterrupt(t *testing.T) {
 			done <- commitErr
 			return
 		}
-		waiting <- stream
-		if waitErr := stream.Wait(); !errors.Is(waitErr, driver.ErrInterrupted) {
+		var periodErr error
+		allocs := testing.AllocsPerRun(5, func() {
+			if periodErr != nil {
+				return
+			}
+			if periodErr = stream.Wait(); periodErr != nil {
+				return
+			}
+			stream.Buffers()
+			periodErr = stream.Commit()
+		})
+		if periodErr != nil || allocs != 0 {
 			_ = stream.Stop()
 			_ = stream.Close()
-			done <- fmt.Errorf("interrupted Wait() = %v, want driver.ErrInterrupted", waitErr)
+			done <- fmt.Errorf("render period allocations=%v error=%v", allocs, periodErr)
+			return
+		}
+		waiting <- stream
+		for {
+			waitErr := stream.Wait()
+			if errors.Is(waitErr, driver.ErrInterrupted) {
+				break
+			}
+			if waitErr != nil {
+				periodErr = waitErr
+				break
+			}
+			if periodErr = stream.Commit(); periodErr != nil {
+				break
+			}
+		}
+		if periodErr != nil {
+			_ = stream.Stop()
+			_ = stream.Close()
+			done <- periodErr
 			return
 		}
 		stopErr := stream.Stop()
@@ -242,4 +280,19 @@ func defaultSharedPeriod(endpointID string) (int, error) {
 		return 0, err
 	}
 	return int(period), nil
+}
+
+func TestRenderReadinessUsesCompletePeriodSpace(t *testing.T) {
+	for _, test := range []struct {
+		padding uint32
+		want    bool
+	}{{1056, false}, {577, false}, {576, true}, {96, true}, {0, true}} {
+		got, err := renderPeriodAvailable(1056, test.padding, 480)
+		if err != nil || got != test.want {
+			t.Fatalf("padding %d: ready=%v err=%v, want %v", test.padding, got, err, test.want)
+		}
+	}
+	if _, err := renderPeriodAvailable(1056, 1057, 480); !errors.Is(err, driver.ErrFormat) {
+		t.Fatalf("invalid padding: %v", err)
+	}
 }

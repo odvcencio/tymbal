@@ -83,6 +83,7 @@ type wasapiStream struct {
 	waitHandles    [2]uintptr
 	bufferFrames   uint32
 	renderBuffer   uintptr // reusable COM output slot; its address stays off the stack
+	renderPadding  uint32
 
 	comInitialized bool
 	clientStarted  bool
@@ -370,36 +371,53 @@ func (s *wasapiStream) Wait() error {
 	if !s.started || s.stopped {
 		return fmt.Errorf("tymbal wasapi: wait outside a running stream")
 	}
-	if s.interruptRequested.Load() {
-		s.ready = false
-		return driver.ErrInterrupted
+	if s.ready {
+		return fmt.Errorf("tymbal wasapi: wait before committing the previous render period")
 	}
-	s.ready = false
-	result, _, callErr := syscall.SyscallN(
-		s.waitProc,
-		2,
-		uintptr(unsafe.Pointer(&s.waitHandles[0])),
-		0,
-		infinite,
-	)
-	runtime.KeepAlive(&s.waitHandles)
-	if result == waitObject0 {
+	for {
 		if s.interruptRequested.Load() {
 			return driver.ErrInterrupted
 		}
-		s.ready = true
-		return nil
-	}
-	if result == waitObject0+1 {
-		return driver.ErrInterrupted
-	}
-	if result == waitFailed {
-		if callErr == 0 {
-			callErr = syscall.EINVAL
+		s.renderPadding = 0
+		hr := comCall1(s.client, audioClientGetCurrentPadding, uintptr(unsafe.Pointer(&s.renderPadding)))
+		runtime.KeepAlive(s)
+		if err := renderHRESULT("IAudioClient.GetCurrentPadding", hr); err != nil {
+			return err
 		}
-		return fmt.Errorf("tymbal wasapi: wait for render event: %w", callErr)
+		available, err := renderPeriodAvailable(s.bufferFrames, s.renderPadding, s.params.Period)
+		if err != nil {
+			return err
+		}
+		if available {
+			if s.interruptRequested.Load() {
+				return driver.ErrInterrupted
+			}
+			s.ready = true
+			return nil
+		}
+		result, _, callErr := syscall.SyscallN(s.waitProc,
+			2, uintptr(unsafe.Pointer(&s.waitHandles[0])), 0, infinite)
+		runtime.KeepAlive(s)
+		if result == waitObject0+1 || s.interruptRequested.Load() {
+			return driver.ErrInterrupted
+		}
+		if result == waitFailed {
+			if callErr == 0 {
+				callErr = syscall.EINVAL
+			}
+			return fmt.Errorf("tymbal wasapi: wait for render event: %w", callErr)
+		}
+		if result != waitObject0 {
+			return fmt.Errorf("tymbal wasapi: unexpected wait result 0x%08X", uint32(result))
+		}
 	}
-	return fmt.Errorf("tymbal wasapi: unexpected wait result 0x%08X", uint32(result))
+}
+
+func renderPeriodAvailable(bufferFrames, padding uint32, period int) (bool, error) {
+	if period <= 0 || uint64(period) > uint64(bufferFrames) || padding > bufferFrames {
+		return false, fmt.Errorf("%w: invalid render padding or period", driver.ErrFormat)
+	}
+	return uint64(bufferFrames-padding) >= uint64(period), nil
 }
 
 func (s *wasapiStream) Interrupt() {
@@ -735,10 +753,10 @@ func getCurrentSharedEnginePeriod(client uintptr) (uintptr, uint32, error) {
 }
 
 func bufferGeometry(bufferFrames uint32, period, rate int) (int, time.Duration, error) {
-	if bufferFrames == 0 || period <= 0 || rate <= 0 || uint64(bufferFrames) < uint64(period) || bufferFrames%uint32(period) != 0 {
+	if bufferFrames == 0 || period <= 0 || rate <= 0 || uint64(bufferFrames) < uint64(period) {
 		return 0, 0, fmt.Errorf("%w: WASAPI buffer of %d frames cannot provide complete %d-frame callbacks", driver.ErrFormat, bufferFrames, period)
 	}
-	periods := uint64(bufferFrames) / uint64(period)
+	periods := (uint64(bufferFrames) + uint64(period) - 1) / uint64(period)
 	if periods == 0 || periods > uint64(int(^uint(0)>>1)) {
 		return 0, 0, fmt.Errorf("%w: WASAPI buffer geometry overflows", driver.ErrFormat)
 	}

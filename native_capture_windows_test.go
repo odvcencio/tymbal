@@ -15,6 +15,18 @@ func TestNativePublicCapture(t *testing.T) {
 	if os.Getenv("TYMBAL_REQUIRE_CAPTURE") != "1" {
 		t.Skip("set TYMBAL_REQUIRE_CAPTURE=1 to run the native Windows capture test")
 	}
+	testNativePublicCapture(t, false, 480)
+}
+
+func TestNativePublicExclusiveCapture(t *testing.T) {
+	if os.Getenv("TYMBAL_REQUIRE_EXCLUSIVE_CAPTURE") != "1" {
+		t.Skip("set TYMBAL_REQUIRE_EXCLUSIVE_CAPTURE=1 to require native exclusive capture")
+	}
+	testNativePublicCapture(t, true, 128)
+}
+
+func testNativePublicCapture(t *testing.T, exclusive bool, requestedPeriod int) {
+	t.Helper()
 
 	var host tymbal.Host
 	for _, candidate := range tymbal.Hosts() {
@@ -48,6 +60,9 @@ func TestNativePublicCapture(t *testing.T) {
 	if input == nil {
 		t.Fatal("Windows exposes no active WASAPI capture endpoint")
 	}
+	if exclusive && !input.Exclusive {
+		t.Fatal("required exclusive capture endpoint does not advertise exact format support")
+	}
 
 	var callbacks atomic.Uint64
 	var invalid atomic.Bool
@@ -55,11 +70,11 @@ func TestNativePublicCapture(t *testing.T) {
 	var previousFrame uint64
 	var previousInputNano int64
 	var haveFrame bool
-	const requestedPeriod = 480
 	actualPeriod := requestedPeriod
 	stream, err := tymbal.Open(host, tymbal.Config{
 		Input: input, InChannels: input.Inputs,
 		SampleRate: input.SampleRates[0], Period: requestedPeriod, Periods: 2,
+		Exclusive: exclusive,
 	}, func(tm tymbal.Time, in, out [][]float32) {
 		if !haveFrame && tm.Frame != 0 {
 			invalid.Store(true)
@@ -143,5 +158,7 @@ func TestNativePublicCapture(t *testing.T) {
 		t.Fatal("capture callback reported incomplete input, output data, discontinuous frame positions, or invalid input timestamps")
 	}
 	actual = stream.Actual()
-	t.Logf("WASAPI capture: callbacks=%d dropouts=%d priority=%s valid_input_timestamps=%d", stats.Callbacks, stats.Dropouts, actual.Priority, inputNanoSamples.Load())
+	t.Logf("WASAPI capture: exclusive=%t requested_period=%d rate=%d period=%d periods=%d channels=%d format=%s latency_in=%s callbacks=%d dropouts=%d priority=%s valid_input_timestamps=%d",
+		exclusive, requestedPeriod, actual.SampleRate, actual.Period, actual.Periods, actual.InChannels, actual.InFormat, actual.LatencyIn,
+		stats.Callbacks, stats.Dropouts, actual.Priority, inputNanoSamples.Load())
 }
