@@ -53,6 +53,7 @@ func TestRaiseProcessThreadsRaisesOnlyNormalThreadsAndRestores(t *testing.T) {
 	f.add(1, linuxSchedAttr{Size: size, Nice: 3})
 	f.add(2, linuxSchedAttr{Size: size, Policy: linuxSchedFIFO, Priority: 70, Flags: linuxResetOnFork}) // stream thread
 	f.add(3, linuxSchedAttr{Size: size})
+	f.add(6, linuxSchedAttr{Size: size, Policy: linuxSchedFIFO, Priority: 50}) // an existing real-time thread at p
 	// An unraised thread starts thread 4 during the first pass.
 	f.onSet = func(tid int) {
 		if tid == 3 {
@@ -85,6 +86,9 @@ func TestRaiseProcessThreadsRaisesOnlyNormalThreadsAndRestores(t *testing.T) {
 	}
 	if a := f.attrs[2]; a.Policy != linuxSchedFIFO || a.Priority != 70 {
 		t.Fatalf("restore touched the stream thread: %+v", a)
+	}
+	if a := f.attrs[6]; a.Policy != linuxSchedFIFO || a.Priority != 50 {
+		t.Fatalf("restore demoted a thread that was real-time before the raise: %+v", a)
 	}
 }
 

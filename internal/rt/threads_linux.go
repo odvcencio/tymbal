@@ -11,11 +11,14 @@ import (
 )
 
 // RaiseProcessThreads gives every thread of this process that runs the normal
-// SCHED_OTHER policy the SCHED_FIFO priority p. It returns a function that
-// puts back those threads and any thread that inherited p since, and the
-// number of threads raised. Threads created later inherit the policy of the
-// thread that creates them. A thread that already runs a real-time policy,
-// such as a stream thread, is left alone.
+// SCHED_OTHER policy the SCHED_FIFO priority p, and returns the number of
+// threads raised. Threads created later inherit the policy of the thread that
+// creates them. A thread that already runs a real-time policy, such as a
+// stream thread, is left alone.
+//
+// The returned function puts back the threads it raised, and resets threads
+// created since the raise that run SCHED_FIFO p to the normal policy. It never
+// changes a thread that already existed and was not raised.
 //
 // The stream thread takes Go runtime locks around its system calls, for
 // example the scheduler lock when it wakes the runtime's monitor thread. If a
@@ -46,7 +49,8 @@ func raiseProcessThreads(c linuxThreadCalls, p int) (func(), int, error) {
 		return func() {}, 0, fmt.Errorf("rt: invalid SCHED_FIFO priority %d", p)
 	}
 	size := uint32(unsafe.Sizeof(linuxSchedAttr{}))
-	previous := make(map[int]linuxSchedAttr)
+	previous := make(map[int]linuxSchedAttr) // threads raised here
+	existing := make(map[int]bool)           // every thread seen while raising
 	var firstErr error
 	// A thread created during a pass inherits its creator's policy. Repeat until
 	// a pass raises nothing, so a thread started by an unraised thread is caught.
@@ -58,6 +62,7 @@ func raiseProcessThreads(c linuxThreadCalls, p int) (func(), int, error) {
 		}
 		changed := false
 		for _, tid := range tids {
+			existing[tid] = true
 			if _, done := previous[tid]; done {
 				continue
 			}
@@ -85,13 +90,16 @@ func raiseProcessThreads(c linuxThreadCalls, p int) (func(), int, error) {
 			return
 		}
 		for _, tid := range tids {
+			back, raised := previous[tid]
+			if !raised && existing[tid] {
+				continue // it existed before and was not raised here
+			}
 			attr := linuxSchedAttr{Size: size}
 			if c.getAttr(tid, &attr) != nil || attr.Policy != linuxSchedFIFO || attr.Priority != uint32(p) || attr.Flags&linuxResetOnFork != 0 {
 				continue
 			}
-			back, ok := previous[tid]
-			if !ok {
-				back = linuxSchedAttr{Size: size} // inherited p after the raise
+			if !raised {
+				back = linuxSchedAttr{Size: size} // created since the raise; it inherited p
 			}
 			_ = c.setAttr(tid, &back)
 		}
