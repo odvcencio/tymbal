@@ -88,7 +88,12 @@ func runNativeFakeWith(t *testing.T, loopback bool, dropout bool, opts NativeOpt
 		control.InjectDropout(int(m.probeEnd)/cfg.Period + 10)
 	}
 	if err := control.Advance(int(m.end)/cfg.Period - 1); err != nil {
-		t.Fatal(err)
+		select {
+		case r := <-resultC:
+			t.Fatalf("advance: %v; harness: %v", err, r.err)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("advance: %v; harness did not return", err)
+		}
 	}
 	select {
 	case r := <-resultC:
