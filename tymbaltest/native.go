@@ -180,18 +180,30 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 }
 
 // warmThreads makes the runtime create spare threads before the stream starts.
-// Creating a thread allocates, and the runtime creates one whenever a goroutine
-// blocks in a system call and no idle thread can take its P. Each sleeper holds
-// a thread in a system call, so the runtime must create more to run the rest.
+// Creating a thread allocates. The runtime creates one whenever a goroutine
+// blocks in a system call and no idle thread can take its P, including when it
+// resumes a preempted locked goroutine. Each sleeper holds a thread in a sleep
+// system call until all of them have started, so the runtime must create one
+// thread per sleeper; the threads stay idle afterwards.
 func warmThreads() {
+	var started atomic.Int32
+	var release atomic.Bool
 	var wg sync.WaitGroup
 	for i := 0; i < warmThreadCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rt.SleepThread(10 * time.Millisecond)
+			started.Add(1)
+			for !release.Load() {
+				rt.SleepThread(time.Millisecond)
+			}
 		}()
 	}
+	for started.Load() < warmThreadCount {
+		rt.SleepThread(time.Millisecond)
+	}
+	rt.SleepThread(20 * time.Millisecond)
+	release.Store(true)
 	wg.Wait()
 }
 
