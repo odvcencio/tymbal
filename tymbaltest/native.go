@@ -34,7 +34,8 @@ const (
 	nativeProbePoints = 512
 	nativeMaxDelay    = 1 << 18
 	nativeMaxBreaks   = 4096
-	warmThreadCount   = 8
+	warmThreadCount   = 12
+	warmThreadFor     = 50 * time.Millisecond
 )
 
 // NativeLoopback measures an enumerated duplex pair without simulating or
@@ -180,30 +181,24 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 }
 
 // warmThreads makes the runtime create spare threads before the stream starts.
-// Creating a thread allocates. The runtime creates one whenever a goroutine
-// blocks in a system call and no idle thread can take its P, including when it
-// resumes a preempted locked goroutine. Each sleeper holds a thread in a sleep
-// system call until all of them have started, so the runtime must create one
-// thread per sleeper; the threads stay idle afterwards.
+// Creating a thread allocates. The runtime creates one whenever it must run a
+// goroutine or hand off a P and no idle thread exists, including when it
+// resumes a preempted locked goroutine. Every sleeper sleeps to one shared
+// deadline, so each started sleeper holds its thread in the kernel and the
+// runtime must create a new thread to start the next one. The threads stay
+// idle afterwards.
 func warmThreads() {
-	var started atomic.Int32
-	var release atomic.Bool
 	var wg sync.WaitGroup
+	until := time.Now().Add(warmThreadFor)
 	for i := 0; i < warmThreadCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			started.Add(1)
-			for !release.Load() {
-				rt.SleepThread(time.Millisecond)
+			if d := time.Until(until); d > 0 {
+				rt.SleepThread(d)
 			}
 		}()
 	}
-	for started.Load() < warmThreadCount {
-		rt.SleepThread(time.Millisecond)
-	}
-	rt.SleepThread(20 * time.Millisecond)
-	release.Store(true)
 	wg.Wait()
 }
 

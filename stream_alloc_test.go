@@ -68,28 +68,20 @@ var streamAllocSink *[4]uint64
 
 // warmTestThreads makes the runtime create spare threads now. Each test
 // stream's locked thread exits with it, and a replacement thread created
-// inside the counted window would allocate there. Each sleeper holds a thread
-// in a sleep system call until all of them have started.
+// inside the counted window would allocate there. Every sleeper sleeps to one
+// shared deadline, so each holds its own thread.
 func warmTestThreads() {
-	const sleepers = 8
-	var started atomic.Int32
-	var release atomic.Bool
 	var wg sync.WaitGroup
-	for i := 0; i < sleepers; i++ {
+	until := time.Now().Add(50 * time.Millisecond)
+	for i := 0; i < 12; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			started.Add(1)
-			for !release.Load() {
-				rt.SleepThread(time.Millisecond)
+			if d := time.Until(until); d > 0 {
+				rt.SleepThread(d)
 			}
 		}()
 	}
-	for started.Load() < sleepers {
-		rt.SleepThread(time.Millisecond)
-	}
-	rt.SleepThread(20 * time.Millisecond)
-	release.Store(true)
 	wg.Wait()
 }
 
