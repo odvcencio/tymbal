@@ -40,14 +40,13 @@ type streamStats struct {
 
 // Stream owns a single negotiated audio stream.
 type Stream struct {
-	mu           sync.Mutex
-	state        streamState
-	closing      bool
-	started      bool
-	interrupt    bool
-	closeDone    chan struct{}
-	closeErr     error
-	watchdogStop func()
+	mu        sync.Mutex
+	state     streamState
+	closing   bool
+	started   bool
+	interrupt bool
+	closeDone chan struct{}
+	closeErr  error
 
 	device driver.Stream
 	cb     Callback
@@ -284,15 +283,12 @@ func (s *Stream) Start() error {
 	}
 	s.state = stateRunning
 	s.started = true
-	s.watchdogStop = rt.StartWatchdog(time.Second, func(allocs uint64) {
-		atomicSaturatingAdd(&s.stats.allocs, allocs)
-	})
 	s.startDone = make(chan struct{})
 	s.done = make(chan struct{})
 	startDone := s.startDone
 	go s.run()
 	s.mu.Unlock()
-	<-startDone
+	awaitClosed(startDone)
 	s.mu.Lock()
 	err := s.startErr
 	s.mu.Unlock()
@@ -309,7 +305,7 @@ func (s *Stream) Stop() error {
 	if s.closing || s.state == stateClosed {
 		done := s.closeDone
 		s.mu.Unlock()
-		<-done
+		awaitClosed(done)
 		return ErrState
 	}
 	if !s.started {
@@ -333,7 +329,7 @@ func (s *Stream) Stop() error {
 	if interrupt {
 		s.device.Interrupt()
 	}
-	<-done
+	awaitClosed(done)
 	return nil
 }
 
@@ -347,7 +343,7 @@ func (s *Stream) Close() error {
 	if s.closing {
 		done := s.closeDone
 		s.mu.Unlock()
-		<-done
+		awaitClosed(done)
 		s.mu.Lock()
 		err := s.closeErr
 		s.mu.Unlock()
@@ -375,7 +371,7 @@ func (s *Stream) Close() error {
 		s.device.Interrupt()
 	}
 	if started {
-		<-done
+		awaitClosed(done)
 	}
 	closeErr := mapBackendError(s.device.Close())
 	s.mu.Lock()
@@ -384,6 +380,34 @@ func (s *Stream) Close() error {
 	close(s.closeDone)
 	s.mu.Unlock()
 	return closeErr
+}
+
+// awaitClosed waits for ch to close. It polls ch between runtime yields and
+// thread sleeps rather than blocking on it, because a blocked receive can
+// allocate inside the runtime, and until the stream thread's loop exits, the
+// watchdog counts every heap allocation in the process. The sleep grows from
+// 50 µs to 1 ms.
+func awaitClosed(ch <-chan struct{}) {
+	for i := 0; i < 64; i++ {
+		select {
+		case <-ch:
+			return
+		default:
+		}
+		runtime.Gosched()
+	}
+	pause := 50 * time.Microsecond
+	for {
+		select {
+		case <-ch:
+			return
+		default:
+		}
+		rt.SleepThread(pause)
+		if pause < time.Millisecond {
+			pause *= 2
+		}
+	}
 }
 
 // Err reports the first spontaneous failure that stopped the stream.
@@ -423,7 +447,13 @@ func (s *Stream) run() {
 	s.mu.Lock()
 	s.actual.Priority = grant.String()
 	s.mu.Unlock()
+	// Setup above may allocate; the loop must not. The watchdog's exact
+	// readings bracket device start and the loop on this thread.
+	stopWatchdog := rt.StartWatchdog(time.Second, func(total uint64) {
+		atomicMaxUint64(&s.stats.allocs, total)
+	})
 	if err := s.device.Start(); err != nil {
+		stopWatchdog()
 		s.mu.Lock()
 		s.startErr = err
 		s.mu.Unlock()
@@ -436,6 +466,7 @@ func (s *Stream) run() {
 	}
 	close(s.startDone)
 	s.loop()
+	stopWatchdog()
 	stopErr := s.device.Stop()
 	if stopErr != nil {
 		s.setFailure(stopErr)
@@ -445,13 +476,6 @@ func (s *Stream) run() {
 }
 
 func (s *Stream) finishRun() {
-	s.mu.Lock()
-	watchdogStop := s.watchdogStop
-	s.watchdogStop = nil
-	s.mu.Unlock()
-	if watchdogStop != nil {
-		watchdogStop()
-	}
 	s.mu.Lock()
 	if s.failureReady.Load() {
 		s.state = stateFailed
@@ -639,6 +663,17 @@ func atomicSaturatingAdd(v *atomic.Uint64, delta uint64) {
 			next = math.MaxUint64
 		}
 		if v.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// atomicMaxUint64 keeps the largest value stored. It runs on the watchdog's
+// sampler and on the stream thread after the loop exits.
+func atomicMaxUint64(v *atomic.Uint64, candidate uint64) {
+	for {
+		old := v.Load()
+		if candidate <= old || v.CompareAndSwap(old, candidate) {
 			return
 		}
 	}
