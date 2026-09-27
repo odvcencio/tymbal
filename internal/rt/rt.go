@@ -75,10 +75,10 @@ func LockProcessMemory() error { return ErrUnsupported }
 // sampler's readings between them never stop the world, so they are lower
 // bounds.
 //
-// The sampler waits in SleepThread, not on a Go timer or channel, so on Linux,
-// where SleepThread is a system call, the watchdog allocates nothing after
-// StartWatchdog returns. stop does not wait for the sampler. The sampler exits
-// within one interval and never reports more than stop's exact total.
+// The sampler waits in SleepThread, not on a Go timer or channel, so on Linux
+// and Windows, where SleepThread is a system call, the watchdog allocates
+// nothing after StartWatchdog returns. stop does not wait for the sampler. The
+// sampler exits within 100 ms and never reports more than stop's exact total.
 //
 // Call StartWatchdog after setup allocation and before the real-time loop.
 // Call stop after the loop exits and before cleanup allocates.
@@ -108,11 +108,16 @@ type allocWatchdog struct {
 	interval time.Duration
 }
 
+// samplerSlice bounds how long the sampler outlives stop, holding a thread.
+const samplerSlice = 100 * time.Millisecond
+
 func (w *allocWatchdog) sample() {
 	for {
-		SleepThread(w.interval)
-		if w.stopped.Load() {
-			return
+		for slept := time.Duration(0); slept < w.interval; slept += samplerSlice {
+			SleepThread(min(samplerSlice, w.interval-slept))
+			if w.stopped.Load() {
+				return
+			}
 		}
 		if !w.counting.Load() {
 			continue
