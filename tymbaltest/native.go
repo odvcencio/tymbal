@@ -4,13 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"m31labs.dev/tymbal"
+	"m31labs.dev/tymbal/internal/rt"
 )
 
 // NativeOptions configures a real duplex loopback run. The caller must connect
@@ -25,12 +29,19 @@ type NativeOptions struct {
 	// external load worker accepting -load cpu,gc. It is required with Load;
 	// the harness starts, monitors, and reaps it outside the audio callback.
 	LoadCommand []string
+	// RuntimePriority, when positive, gives this process's other threads
+	// SCHED_FIFO at this priority while the stream runs (rt.RaiseProcessThreads,
+	// Linux only), after the load worker has started. The stream thread must
+	// outrank it; if it does not, the threads are restored and the run fails.
+	RuntimePriority int
 }
 
 const (
 	nativeProbePoints = 512
 	nativeMaxDelay    = 1 << 18
 	nativeMaxBreaks   = 4096
+	warmThreadCount   = 12
+	warmThreadFor     = 50 * time.Millisecond
 )
 
 // NativeLoopback measures an enumerated duplex pair without simulating or
@@ -81,60 +92,115 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 		return Report{}, err
 	}
 
-	var loadExit <-chan error
+	// From Start until Stop, this goroutine and the load monitor must not
+	// allocate: the stream's watchdog counts every heap allocation in the
+	// process. Go timers, channel waits, and os.Process.Wait can allocate
+	// inside the runtime, so the run is watched with thread sleeps and flags.
+	var loadExited atomic.Bool
+	var loadWait func() error
 	if len(opts.Load) > 0 {
 		args := append([]string{}, opts.LoadCommand[1:]...)
 		args = append(args, "-load", strings.Join(opts.Load, ","))
 		child := exec.Command(opts.LoadCommand[0], args...)
-		if err := child.Start(); err != nil {
+		// The worker never writes to stdout, so EOF on this pipe means it exited.
+		exitRead, exitWrite, err := os.Pipe()
+		if err != nil {
 			return Report{}, fmt.Errorf("native load: %w", err)
 		}
-		exited := make(chan error, 1)
-		go func() { exited <- child.Wait() }()
-		loadExit = exited
-		defer func() {
-			if loadExit != nil {
-				_ = child.Process.Kill()
-				<-loadExit
+		child.Stdout = exitWrite
+		startErr := child.Start()
+		_ = exitWrite.Close() // Only the worker holds the write end now.
+		if startErr != nil {
+			_ = exitRead.Close()
+			return Report{}, fmt.Errorf("native load: %w", startErr)
+		}
+		monitorDone := make(chan struct{})
+		probe := make([]byte, 1)
+		go func() {
+			defer close(monitorDone)
+			for {
+				if _, err := exitRead.Read(probe); err != nil {
+					loadExited.Store(true)
+					return
+				}
 			}
 		}()
+		waited := false
+		loadWait = func() error {
+			waited = true
+			return child.Wait()
+		}
+		defer func() {
+			if !waited {
+				_ = child.Process.Kill()
+				_ = child.Wait()
+			}
+			<-monitorDone
+			_ = exitRead.Close()
+		}()
 	}
+	warmThreads()
+	// Raising happens before Start, so its allocations precede the watchdog's
+	// baseline. The load worker has already started and keeps normal priority.
+	runtimeNote := ""
+	runtimeRaised := false
+	restoreRuntime := func() {}
+	if opts.RuntimePriority > 0 {
+		restore, raised, err := raiseProcessThreads(opts.RuntimePriority)
+		restoreRuntime, runtimeRaised = restore, raised > 0
+		switch {
+		case raised > 0 && err == nil:
+			runtimeNote = fmt.Sprintf("SCHED_FIFO %d on %d threads", opts.RuntimePriority, raised)
+		case raised > 0:
+			runtimeNote = fmt.Sprintf("SCHED_FIFO %d on %d threads; others failed: %v", opts.RuntimePriority, raised, err)
+		default:
+			runtimeNote = fmt.Sprintf("unavailable: %v", err)
+		}
+	}
+	defer func() { restoreRuntime() }()
 	if err := stream.Start(); err != nil {
 		return Report{}, err
 	}
+	var runtimeErr error
+	if runtimeRaised && !grantOutranks(stream.Actual().Priority, opts.RuntimePriority) {
+		// Raised runtime threads would outrank the stream thread. This path
+		// allocates inside the counted window, and the run fails anyway.
+		restoreRuntime()
+		restoreRuntime = func() {}
+		runtimeErr = fmt.Errorf("stream thread priority %q does not outrank runtime threads at SCHED_FIFO %d; restored them", stream.Actual().Priority, opts.RuntimePriority)
+		runtimeNote += "; restored at start"
+	}
 	// A stopped device clock must not turn a bounded run into an infinite wait.
 	// Duration is measured in complete callback frames, not timer ticks.
-	watchdog := time.NewTimer(metrics.runDuration + 5*time.Second)
-	defer watchdog.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
+	deadline := time.Now().Add(metrics.runDuration + 5*time.Second)
 	var runErr error
-run:
 	for {
-		select {
-		case err := <-loadExit:
-			loadExit = nil // already reaped; the deferred cleanup must not wait again
-			runErr = fmt.Errorf("native load worker exited early: %v", err)
-			break run
-		case <-watchdog.C:
-			runErr = fmt.Errorf("native loopback timed out before completing requested frames")
-			break run
-		case <-ticker.C:
-			if err := stream.Err(); err != nil {
-				runErr = err
-				break run
-			}
-			if metrics.done.Load() {
-				break run
-			}
+		if loadExited.Load() {
+			runErr = fmt.Errorf("native load worker exited early: %v", loadWait())
+			break
 		}
+		if err := stream.Err(); err != nil {
+			runErr = err
+			break
+		}
+		if metrics.done.Load() {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			runErr = fmt.Errorf("native loopback timed out before completing requested frames")
+			break
+		}
+		rt.SleepThread(10 * time.Millisecond)
 	}
 	stopErr := stream.Stop() // joins the callback before reading derived metrics
+	restoreRuntime()
+	restoreRuntime = func() {}
 	var stats tymbal.Stats
 	stream.Stats(&stats)
 	actual = stream.Actual() // priority is granted during Start
-	runErr = errors.Join(runErr, stopErr, stream.Err(), stream.Close())
+	runErr = errors.Join(runErr, runtimeErr, stopErr, stream.Err(), stream.Close())
 	record := metrics.report(host.Name(), out.ID, in.ID, actual, stats, opts.Load)
+	record.RuntimePriority = runtimeNote
 	if metrics.invalid {
 		runErr = errors.Join(runErr, fmt.Errorf("native loopback received invalid samples or incomplete callback buffers"))
 	}
@@ -148,6 +214,43 @@ run:
 		record.Passed = false
 	}
 	return record, runErr
+}
+
+// raiseProcessThreads is a seam for tests.
+var raiseProcessThreads = rt.RaiseProcessThreads
+
+// grantOutranks reports whether a stream grant such as "SCHED_FIFO 70" is a
+// real-time priority above p. It does not allocate for well-formed grants.
+func grantOutranks(grant string, p int) bool {
+	for _, kind := range [...]string{"SCHED_FIFO ", "SCHED_RR "} {
+		if strings.HasPrefix(grant, kind) {
+			n, err := strconv.Atoi(grant[len(kind):])
+			return err == nil && n > p
+		}
+	}
+	return false
+}
+
+// warmThreads makes the runtime create spare threads before the stream starts.
+// Creating a thread allocates. The runtime creates one whenever it must run a
+// goroutine or hand off a P and no idle thread exists, including when it
+// resumes a preempted locked goroutine. Every sleeper sleeps to one shared
+// deadline, so each started sleeper holds its thread in the kernel and the
+// runtime must create a new thread to start the next one. The threads stay
+// idle afterwards.
+func warmThreads() {
+	var wg sync.WaitGroup
+	until := time.Now().Add(warmThreadFor)
+	for i := 0; i < warmThreadCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if d := time.Until(until); d > 0 {
+				rt.SleepThread(d)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 type nativeCorrelation struct {
@@ -401,6 +504,12 @@ func (m *nativeMetrics) report(host, out, in string, actual tymbal.Actual, stats
 	// Physical round trip need not equal OS-reported buffering. Keep both raw
 	// measurements; device-specific latency tolerance requires repeated runs.
 	r.Passed = m.processed >= m.end && !m.invalid && !m.discontinuity && r.LatencyMeasuredFrames >= 0 && m.continuity.active && m.continuity.windows >= 2 && r.BreaksDetected == 0 && r.DropoutsReported == 0
+	// The watchdog must read zero allocations for the whole run. The virtual
+	// FakeHost driver allocates a wake channel each period, so the check
+	// applies to platform hosts only.
+	if host != "fake" {
+		r.Passed = r.Passed && r.Allocs == 0
+	}
 	if actual.HasDeadline {
 		periodUS := float64(actual.Period) / float64(actual.SampleRate) * 1e6
 		r.Passed = r.Passed && r.WakeLateUS.P999 < periodUS*0.25 && r.WakeLateUS.Max < periodUS*0.75

@@ -56,7 +56,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  report report.json...   print report records as a Markdown table")
 	fmt.Fprintln(w, "  tone [options]          play a sine tone on a platform or fake host")
 	fmt.Fprintln(w, "Loopback options: -rate 48000 -period 128 -periods 2 -dur 1s -delay-periods 2 -dropout -json report.json")
-	fmt.Fprintln(w, "Native loopback: -host alsa|wasapi -out ID -in ID -channels 1 -max-delay-periods N -load cpu,gc -exclusive")
+	fmt.Fprintln(w, "Native loopback: -host alsa|wasapi -out ID -in ID -channels 1 -max-delay-periods N -load cpu,gc -runtime-priority 50 -exclusive")
 	fmt.Fprintln(w, "Tone options: -host alsa|wasapi|fake -device ID -rate 48000 -period 256 -periods 2 -channels 2 -freq 997 -dur 10s -exclusive")
 }
 
@@ -212,6 +212,7 @@ func runLoopback(args []string, soak bool) error {
 	dropout := fs.Bool("dropout", false, "inject one virtual dropped period")
 	dropoutAt := fs.Int("dropout-at", 0, "period for the injected dropout")
 	load := fs.String("load", defaultLoad, "comma-separated load generators: cpu,gc; native runs use a child process")
+	runtimePriority := fs.Int("runtime-priority", 50, "native runs: SCHED_FIFO priority for this process's other threads while the stream runs, below the stream thread's; 0 leaves them normal")
 	jsonPath := fs.String("json", "", "write the JSON report to this path")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -275,7 +276,7 @@ func runLoopback(args []string, soak bool) error {
 		if err != nil {
 			return err
 		}
-		nativeOpts := tymbaltest.NativeOptions{Duration: *duration, MaxDelayPeriods: *maxDelay, Load: opts.Load}
+		nativeOpts := tymbaltest.NativeOptions{Duration: *duration, MaxDelayPeriods: *maxDelay, Load: opts.Load, RuntimePriority: *runtimePriority}
 		if len(opts.Load) > 0 {
 			executable, err := os.Executable()
 			if err != nil {

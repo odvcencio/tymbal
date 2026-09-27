@@ -156,6 +156,10 @@ type Histogram = hist.Histogram
 // WakeInterval observes elapsed time between serviced wakes, including callback,
 // backend, recovery, and scheduling time, not device deadline lateness.
 // WakeIntervalMax is the exact maximum observed interval, without histogram rounding.
+// AllocsSinceRun counts heap allocations made anywhere in the process from just
+// before the device starts until the loop exits. It includes other goroutines
+// and the runtime's own allocations. It is exact after Stop; while the stream
+// runs it is a lower bound that the watchdog raises about once per second.
 type Stats struct {
 	Callbacks       uint64
 	Dropouts        uint64
