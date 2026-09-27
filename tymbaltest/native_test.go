@@ -34,12 +34,27 @@ func nativeTestDevice(t *testing.T, host tymbal.Host) tymbal.Device {
 // Advance waits for Commit, so the runner sees exactly the requested periods.
 func runNativeFake(t *testing.T, loopback bool, dropout bool, loadCommand ...string) Report {
 	t.Helper()
-	host, control := NewFakeHost(FakeConfig{Manual: true, Loopback: loopback, Delay: 2})
-	device := nativeTestDevice(t, host)
-	cfg, opts := nativeTestConfig(), nativeTestOptions()
+	opts := nativeTestOptions()
 	if len(loadCommand) != 0 {
 		opts.Load, opts.LoadCommand = []string{"cpu", "gc"}, loadCommand
 	}
+	report, err := runNativeFakeWith(t, loopback, dropout, opts)
+	if loopback && err != nil {
+		t.Fatal(err)
+	}
+	if !loopback && !errors.Is(err, errNoCorrelation) {
+		t.Fatalf("unconnected capture error = %v, want no correlation", err)
+	}
+	return report
+}
+
+// runNativeFakeWith runs the harness against a manual FakeHost and returns
+// its report and error without judging them.
+func runNativeFakeWith(t *testing.T, loopback bool, dropout bool, opts NativeOptions) (Report, error) {
+	t.Helper()
+	host, control := NewFakeHost(FakeConfig{Manual: true, Loopback: loopback, Delay: 2})
+	device := nativeTestDevice(t, host)
+	cfg := nativeTestConfig()
 	m, err := newNativeMetrics(tymbal.Actual{SampleRate: cfg.SampleRate, Period: cfg.Period, InChannels: 1, OutChannels: 1}, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -77,12 +92,6 @@ func runNativeFake(t *testing.T, loopback bool, dropout bool, loadCommand ...str
 	}
 	select {
 	case r := <-resultC:
-		if loopback && r.err != nil {
-			t.Fatal(r.err)
-		}
-		if !loopback && !errors.Is(r.err, errNoCorrelation) {
-			t.Fatalf("unconnected capture error = %v, want no correlation", r.err)
-		}
 		stream, err := tymbal.Open(host, tymbal.Config{Output: &device, OutChannels: 1, SampleRate: cfg.SampleRate, Period: cfg.Period}, ToneCallback(cfg.SampleRate))
 		if err != nil {
 			t.Fatalf("harness did not release the endpoint: %v", err)
@@ -90,11 +99,11 @@ func runNativeFake(t *testing.T, loopback bool, dropout bool, loadCommand ...str
 		if err := stream.Close(); err != nil {
 			t.Fatal(err)
 		}
-		return r.report
+		return r.report, r.err
 	case <-time.After(3 * time.Second):
 		t.Fatal("harness did not stop")
 	}
-	return Report{}
+	return Report{}, nil
 }
 
 func TestNativeLoopbackFakeOrchestrationAndReport(t *testing.T) {
@@ -364,5 +373,65 @@ func TestNativeLoopbackPlatform(t *testing.T) {
 	t.Log(encoded.String())
 	if err != nil || !r.Passed {
 		t.Fatalf("native diagnostic failed: %v", err)
+	}
+}
+
+func TestGrantOutranks(t *testing.T) {
+	for _, c := range []struct {
+		grant string
+		p     int
+		want  bool
+	}{
+		{"SCHED_FIFO 70", 50, true}, {"SCHED_RR 60", 50, true}, {"SCHED_FIFO 50", 50, false},
+		{"SCHED_FIFO 20", 50, false}, {"normal", 50, false}, {"nice -11", 50, false}, {"SCHED_FIFO x", 50, false},
+	} {
+		if got := grantOutranks(c.grant, c.p); got != c.want {
+			t.Fatalf("grantOutranks(%q, %d) = %v, want %v", c.grant, c.p, got, c.want)
+		}
+	}
+}
+
+func TestNativeLoopbackRuntimePriorityUnavailable(t *testing.T) {
+	var raises, restores int
+	previous := raiseProcessThreads
+	raiseProcessThreads = func(p int) (func(), int, error) {
+		raises++
+		if p != 50 {
+			t.Errorf("raised to %d, want 50", p)
+		}
+		return func() { restores++ }, 0, errors.New("not permitted")
+	}
+	t.Cleanup(func() { raiseProcessThreads = previous })
+	opts := nativeTestOptions()
+	opts.RuntimePriority = 50
+	r, err := runNativeFakeWith(t, true, false, opts)
+	if err != nil || !r.Passed || raises != 1 || restores != 1 || r.RuntimePriority != "unavailable: not permitted" {
+		t.Fatalf("err=%v passed=%v raises=%d restores=%d note=%q", err, r.Passed, raises, restores, r.RuntimePriority)
+	}
+}
+
+// Raised runtime threads must stay below the stream thread. Whether the fake
+// stream thread gets a real-time grant depends on this machine, so the test
+// checks the branch that applies.
+func TestNativeLoopbackRuntimePriorityStaysBelowStream(t *testing.T) {
+	var events []string
+	previous := raiseProcessThreads
+	raiseProcessThreads = func(p int) (func(), int, error) {
+		events = append(events, "raise")
+		return func() { events = append(events, "restore") }, 3, nil
+	}
+	t.Cleanup(func() { raiseProcessThreads = previous })
+	opts := nativeTestOptions()
+	opts.RuntimePriority = 50
+	r, err := runNativeFakeWith(t, true, false, opts)
+	if grantOutranks(r.Priority, 50) {
+		if err != nil || !r.Passed || r.RuntimePriority != "SCHED_FIFO 50 on 3 threads" {
+			t.Fatalf("outranking stream: err=%v passed=%v note=%q", err, r.Passed, r.RuntimePriority)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "does not outrank") || r.Passed || !strings.HasSuffix(r.RuntimePriority, "restored at start") {
+		t.Fatalf("stream grant %q: err=%v passed=%v note=%q", r.Priority, err, r.Passed, r.RuntimePriority)
+	}
+	if len(events) != 2 || events[0] != "raise" || events[1] != "restore" {
+		t.Fatalf("events = %v, want one raise then one restore", events)
 	}
 }

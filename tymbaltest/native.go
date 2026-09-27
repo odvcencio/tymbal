@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,11 @@ type NativeOptions struct {
 	// external load worker accepting -load cpu,gc. It is required with Load;
 	// the harness starts, monitors, and reaps it outside the audio callback.
 	LoadCommand []string
+	// RuntimePriority, when positive, gives this process's other threads
+	// SCHED_FIFO at this priority while the stream runs (rt.RaiseProcessThreads,
+	// Linux only), after the load worker has started. The stream thread must
+	// outrank it; if it does not, the threads are restored and the run fails.
+	RuntimePriority int
 }
 
 const (
@@ -134,8 +140,35 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 		}()
 	}
 	warmThreads()
+	// Raising happens before Start, so its allocations precede the watchdog's
+	// baseline. The load worker has already started and keeps normal priority.
+	runtimeNote := ""
+	runtimeRaised := false
+	restoreRuntime := func() {}
+	if opts.RuntimePriority > 0 {
+		restore, raised, err := raiseProcessThreads(opts.RuntimePriority)
+		restoreRuntime, runtimeRaised = restore, raised > 0
+		switch {
+		case raised > 0 && err == nil:
+			runtimeNote = fmt.Sprintf("SCHED_FIFO %d on %d threads", opts.RuntimePriority, raised)
+		case raised > 0:
+			runtimeNote = fmt.Sprintf("SCHED_FIFO %d on %d threads; others failed: %v", opts.RuntimePriority, raised, err)
+		default:
+			runtimeNote = fmt.Sprintf("unavailable: %v", err)
+		}
+	}
+	defer func() { restoreRuntime() }()
 	if err := stream.Start(); err != nil {
 		return Report{}, err
+	}
+	var runtimeErr error
+	if runtimeRaised && !grantOutranks(stream.Actual().Priority, opts.RuntimePriority) {
+		// Raised runtime threads would outrank the stream thread. This path
+		// allocates inside the counted window, and the run fails anyway.
+		restoreRuntime()
+		restoreRuntime = func() {}
+		runtimeErr = fmt.Errorf("stream thread priority %q does not outrank runtime threads at SCHED_FIFO %d; restored them", stream.Actual().Priority, opts.RuntimePriority)
+		runtimeNote += "; restored at start"
 	}
 	// A stopped device clock must not turn a bounded run into an infinite wait.
 	// Duration is measured in complete callback frames, not timer ticks.
@@ -160,11 +193,14 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 		rt.SleepThread(10 * time.Millisecond)
 	}
 	stopErr := stream.Stop() // joins the callback before reading derived metrics
+	restoreRuntime()
+	restoreRuntime = func() {}
 	var stats tymbal.Stats
 	stream.Stats(&stats)
 	actual = stream.Actual() // priority is granted during Start
-	runErr = errors.Join(runErr, stopErr, stream.Err(), stream.Close())
+	runErr = errors.Join(runErr, runtimeErr, stopErr, stream.Err(), stream.Close())
 	record := metrics.report(host.Name(), out.ID, in.ID, actual, stats, opts.Load)
+	record.RuntimePriority = runtimeNote
 	if metrics.invalid {
 		runErr = errors.Join(runErr, fmt.Errorf("native loopback received invalid samples or incomplete callback buffers"))
 	}
@@ -178,6 +214,21 @@ func NativeLoopback(host tymbal.Host, out, in tymbal.Device, cfg tymbal.Config, 
 		record.Passed = false
 	}
 	return record, runErr
+}
+
+// raiseProcessThreads is a seam for tests.
+var raiseProcessThreads = rt.RaiseProcessThreads
+
+// grantOutranks reports whether a stream grant such as "SCHED_FIFO 70" is a
+// real-time priority above p. It does not allocate for well-formed grants.
+func grantOutranks(grant string, p int) bool {
+	for _, kind := range [...]string{"SCHED_FIFO ", "SCHED_RR "} {
+		if strings.HasPrefix(grant, kind) {
+			n, err := strconv.Atoi(grant[len(kind):])
+			return err == nil && n > p
+		}
+	}
+	return false
 }
 
 // warmThreads makes the runtime create spare threads before the stream starts.

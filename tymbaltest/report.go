@@ -50,6 +50,7 @@ type Report struct {
 	WakeIntervalBuckets   [32]uint64   `json:"wake_interval_buckets"`
 	CallbackBuckets       [32]uint64   `json:"callback_buckets"`
 	Allocs                uint64       `json:"allocs"`
+	RuntimePriority       string       `json:"runtime_priority,omitempty"`
 	Go                    string       `json:"go"`
 	OS                    string       `json:"os"`
 	Arch                  string       `json:"arch"`
