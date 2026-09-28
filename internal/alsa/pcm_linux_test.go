@@ -320,6 +320,18 @@ func TestPCMDuplexLinksBeforePrimingAndRunsBothSides(t *testing.T) {
 	}
 }
 
+func TestPCMDuplexLatencyReportsRoundTripBufferOnce(t *testing.T) {
+	fake := &fakePCM{}
+	p := pcmTestParams(1, 256, 2, format.F32LE)
+	s := openTestPCM(t, 111, 112, p, p, fake)
+
+	got := s.Params().LatencyOut + s.Params().LatencyIn
+	want := time.Duration(p.bufferFrames * uint64(time.Second) / uint64(p.rate))
+	if got != want {
+		t.Fatalf("duplex reported latency = %s, want %s (%d-frame round trip)", got, want, p.bufferFrames)
+	}
+}
+
 func TestPCMDuplexWaitMasksReadyEndpointWhileWaitingForPeer(t *testing.T) {
 	fake := &fakePCM{}
 	outP := pcmTestParams(1, 4, 2, format.S16LE)
@@ -602,4 +614,16 @@ func noAllocPCMPoll(fds *[3]pcmPollFD, count int) (int, syscall.Errno) {
 		}
 	}
 	return nready, 0
+}
+
+func TestPCMOutputOnlyLatencyReportsWholeBuffer(t *testing.T) {
+	fake := &fakePCM{}
+	p := pcmTestParams(1, 256, 2, format.F32LE)
+	s := openTestPCM(t, 113, -1, p, pcmParams{}, fake)
+
+	got := s.Params().LatencyOut
+	want := time.Duration(p.bufferFrames * uint64(time.Second) / uint64(p.rate))
+	if got != want || s.Params().LatencyIn != 0 {
+		t.Fatalf("output-only latency = %s in / %s out, want 0 / %s", s.Params().LatencyIn, got, want)
+	}
 }
