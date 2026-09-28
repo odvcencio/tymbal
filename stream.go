@@ -49,10 +49,11 @@ type Stream struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	device driver.Stream
-	cb     Callback
-	cfg    Config
-	actual Actual
+	device       driver.Stream
+	clockSampler driver.ClockSampler
+	cb           Callback
+	cfg          Config
+	actual       Actual
 
 	input   [][]float32
 	output  [][]float32
@@ -160,11 +161,13 @@ func Open(h Host, cfg Config, cb Callback) (*Stream, error) {
 		_ = ds.Close()
 		return nil, ErrFormat
 	}
+	clockSampler, _ := ds.(driver.ClockSampler)
 	s := &Stream{
-		state:  stateOpened,
-		device: ds,
-		cb:     cb,
-		cfg:    cfg,
+		state:        stateOpened,
+		device:       ds,
+		clockSampler: clockSampler,
+		cb:           cb,
+		cfg:          cfg,
 		actual: Actual{
 			SampleRate: p.SampleRate, Period: p.Period, Periods: p.Periods,
 			OutChannels: p.OutChannels, InChannels: p.InChannels,
@@ -580,8 +583,8 @@ func (s *Stream) loop() {
 		}
 		outNano, inNano := s.device.Clock()
 		var clockSample driver.ClockSample
-		if sampler, ok := s.device.(driver.ClockSampler); ok {
-			clockSample = sampler.ClockSample()
+		if s.clockSampler != nil {
+			clockSample = s.clockSampler.ClockSample()
 		}
 		dropouts := s.stats.dropouts.Load()
 		if dropouts > math.MaxUint32 {

@@ -30,7 +30,6 @@ func (d *allocFreeDriver) Open(driver.Request) (driver.Stream, error) { return d
 
 type allocFreeStream struct {
 	periods     int
-	served      atomic.Bool // set after the last served period
 	interrupted atomic.Bool
 	out         [64 * 4]byte
 }
@@ -48,7 +47,6 @@ func (s *allocFreeStream) Wait() error {
 		s.periods--
 		return nil
 	}
-	s.served.Store(true)
 	for !s.interrupted.Load() {
 		rt.SleepThread(time.Millisecond)
 	}
@@ -94,17 +92,25 @@ func runAllocFreeStream(t *testing.T, periods int, cb Callback) Stats {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(host, Config{Output: &device, OutChannels: 1, SampleRate: 48_000, Period: 64, Periods: 2}, cb)
+	var stream *Stream
+	var callbacks uint64
+	wrapped := func(frame Time, input, output [][]float32) {
+		cb(frame, input, output)
+		callbacks++
+		if callbacks == uint64(periods) {
+			stream.stopRequested.Store(true)
+		}
+	}
+	s, err := Open(host, Config{Output: &device, OutChannels: 1, SampleRate: 48_000, Period: 64, Periods: 2}, wrapped)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stream = s
 	defer s.Close()
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
-	for !backend.served.Load() {
-		rt.SleepThread(time.Millisecond)
-	}
+	awaitClosed(s.done)
 	if err := s.Stop(); err != nil {
 		t.Fatal(err)
 	}
