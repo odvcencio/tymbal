@@ -31,10 +31,30 @@ var ErrUnsupported = errors.New("tymbal driver: unsupported mode")
 type Info struct {
 	ID, Name             string
 	Inputs, Outputs      int
+	MixFormat            string
+	MixBits              int
 	SampleRates          []int
 	MinPeriod, MaxPeriod int
+	DefaultPeriod        int
+	FundamentalPeriod    int
 	Default              uint8
 	Exclusive            bool
+}
+
+// ClockSample is the latest device clock observation captured by a stream.
+// QPC timestamps use the same monotonic nanosecond domain as rt.Now. A zero
+// frequency or timestamp means the backend could not provide that value.
+type ClockSample struct {
+	OutputPosition, OutputFrequency uint64
+	OutputQPCNano                   int64
+	InputPosition, InputFrequency   uint64
+	InputQPCNano                    int64
+}
+
+// ClockSampler is an optional stream extension for backends that can expose
+// their device position and host-clock observation without another OS call.
+type ClockSampler interface {
+	ClockSample() ClockSample
 }
 
 // Event is a device-change notification.

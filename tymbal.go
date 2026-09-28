@@ -90,8 +90,12 @@ func (h Host) Watch(fn func(DeviceEvent)) (stop func()) {
 type Device struct {
 	ID, Name, Host       string
 	Inputs, Outputs      int
+	MixFormat            string
+	MixBits              int
 	SampleRates          []int
 	MinPeriod, MaxPeriod int
+	DefaultPeriod        int
+	FundamentalPeriod    int
 	Default              Direction
 	Exclusive            bool
 }
@@ -128,13 +132,19 @@ type Config struct {
 // valid only for the duration of the call.
 type Callback func(t Time, in, out [][]float32)
 
-// Time describes the first frame of the callback period.
+// Time describes the first frame of the callback period. Device position and
+// frequency fields are available when a backend exposes a device clock; the
+// existing Nano fields carry its host-monotonic QPC timestamp when available.
 type Time struct {
-	Frame         uint64
-	OutputNano    int64
-	InputNano     int64
-	Dropouts      uint32
-	Discontinuity bool
+	Frame           uint64
+	OutputNano      int64
+	InputNano       int64
+	OutputPosition  uint64
+	OutputFrequency uint64
+	InputPosition   uint64
+	InputFrequency  uint64
+	Dropouts        uint32
+	Discontinuity   bool
 }
 
 // Actual reports the stream parameters granted by the host.
@@ -160,17 +170,21 @@ type Histogram = hist.Histogram
 // before the device starts until the loop exits. It includes other goroutines
 // and the runtime's own allocations. It is exact after Stop; while the stream
 // runs it is a lower bound that the watchdog raises about once per second.
+// CallbackLoopAllocs counts process-wide allocations from immediately before
+// the callback loop starts until it exits. It includes other goroutines and
+// runtime allocations, and is exact after Stop.
 type Stats struct {
-	Callbacks       uint64
-	Dropouts        uint64
-	Late            uint64
-	WakeLate        Histogram
-	WakeInterval    Histogram
-	CallbackTime    Histogram
-	WakeLateMax     time.Duration
-	WakeIntervalMax time.Duration
-	CallbackMax     time.Duration
-	AllocsSinceRun  uint64
+	Callbacks          uint64
+	Dropouts           uint64
+	Late               uint64
+	WakeLate           Histogram
+	WakeInterval       Histogram
+	CallbackTime       Histogram
+	WakeLateMax        time.Duration
+	WakeIntervalMax    time.Duration
+	CallbackMax        time.Duration
+	AllocsSinceRun     uint64
+	CallbackLoopAllocs uint64
 }
 
 func publicDevice(host string, d driver.Info) Device {
@@ -178,7 +192,9 @@ func publicDevice(host string, d driver.Info) Device {
 	return Device{
 		ID: d.ID, Name: d.Name, Host: host,
 		Inputs: d.Inputs, Outputs: d.Outputs,
+		MixFormat: d.MixFormat, MixBits: d.MixBits,
 		SampleRates: rates, MinPeriod: d.MinPeriod, MaxPeriod: d.MaxPeriod,
+		DefaultPeriod: d.DefaultPeriod, FundamentalPeriod: d.FundamentalPeriod,
 		Default: Direction(d.Default), Exclusive: d.Exclusive,
 	}
 }
@@ -187,7 +203,9 @@ func driverInfo(d Device) driver.Info {
 	rates := append([]int(nil), d.SampleRates...)
 	return driver.Info{
 		ID: d.ID, Name: d.Name, Inputs: d.Inputs, Outputs: d.Outputs,
+		MixFormat: d.MixFormat, MixBits: d.MixBits,
 		SampleRates: rates, MinPeriod: d.MinPeriod, MaxPeriod: d.MaxPeriod,
+		DefaultPeriod: d.DefaultPeriod, FundamentalPeriod: d.FundamentalPeriod,
 		Default: uint8(d.Default), Exclusive: d.Exclusive,
 	}
 }

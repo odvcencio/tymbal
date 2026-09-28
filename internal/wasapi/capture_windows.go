@@ -51,14 +51,17 @@ type captureStager struct {
 	ready       bool
 	dropouts    uint64
 
-	stageDevicePosition      uint64
-	stageDevicePositionValid bool
-	expectedDevicePosition   uint64
-	expectedDevicePositionOK bool
-	stageQPCPosition         uint64
-	stageQPCPositionValid    bool
-	activeQPCPosition        uint64
-	activeQPCPositionValid   bool
+	stageDevicePosition       uint64
+	stageDevicePositionValid  bool
+	expectedDevicePosition    uint64
+	expectedDevicePositionOK  bool
+	havePacket                bool
+	stageQPCPosition          uint64
+	stageQPCPositionValid     bool
+	activeDevicePosition      uint64
+	activeDevicePositionValid bool
+	activeQPCPosition         uint64
+	activeQPCPositionValid    bool
 }
 
 // captureStream contains plain negotiated data until Start. Start creates
@@ -582,6 +585,18 @@ func (s *captureStream) Clock() (outNano, inNano int64) {
 	return 0, qpcNano + s.qpcOffsetNano
 }
 
+func (s *captureStream) ClockSample() driver.ClockSample {
+	_, inNano := s.Clock()
+	if !s.stager.activeDevicePositionValid {
+		return driver.ClockSample{InputQPCNano: inNano}
+	}
+	return driver.ClockSample{
+		InputPosition:  s.stager.activeDevicePosition,
+		InputFrequency: uint64(s.params.SampleRate),
+		InputQPCNano:   inNano,
+	}
+}
+
 func (s *captureStream) Deadlines() (wakeNano, commitNano int64) { return 0, 0 }
 
 func (s *captureStream) Dropouts() uint64 { return s.stager.dropouts }
@@ -724,7 +739,7 @@ func (s *captureStager) appendPacket(packet []byte, frames int, flags uint32, de
 		return fmt.Errorf("%w: short capture packet", driver.ErrFormat)
 	}
 	positionValid := flags&audclntCaptureBufferFlagTimestampError == 0
-	discontinuity := flags&audclntCaptureBufferFlagDataDiscontinuity != 0
+	discontinuity := s.havePacket && flags&audclntCaptureBufferFlagDataDiscontinuity != 0
 	if positionValid && s.expectedDevicePositionOK && devicePosition != s.expectedDevicePosition {
 		discontinuity = true
 	}
@@ -765,6 +780,7 @@ func (s *captureStager) appendPacket(packet []byte, frames int, flags uint32, de
 	} else {
 		s.expectedDevicePositionOK = false
 	}
+	s.havePacket = true
 	return nil
 }
 
@@ -776,6 +792,8 @@ func (s *captureStager) preparePeriod() bool {
 	copy(s.input, s.data[:periodBytes])
 	s.activeQPCPosition = s.stageQPCPosition
 	s.activeQPCPositionValid = s.stageQPCPositionValid
+	s.activeDevicePosition = s.stageDevicePosition
+	s.activeDevicePositionValid = s.stageDevicePositionValid
 	s.ready = true
 	return true
 }
@@ -799,6 +817,7 @@ func (s *captureStager) commitPeriod() {
 		s.stageQPCPositionValid = false
 	}
 	s.activeQPCPositionValid = false
+	s.activeDevicePositionValid = false
 	s.ready = false
 }
 
@@ -807,6 +826,7 @@ func (s *captureStager) resetStage() {
 	s.ready = false
 	s.stageDevicePositionValid = false
 	s.stageQPCPositionValid = false
+	s.activeDevicePositionValid = false
 	s.activeQPCPositionValid = false
 }
 
@@ -814,6 +834,7 @@ func (s *captureStager) reset(clearPosition bool) {
 	s.resetStage()
 	if clearPosition {
 		s.expectedDevicePositionOK = false
+		s.havePacket = false
 	}
 }
 

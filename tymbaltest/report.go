@@ -20,6 +20,20 @@ type TimingReport struct {
 	Max  float64 `json:"max"`
 }
 
+// ClockReport summarizes device position and QPC observations collected at
+// the callback boundary. The frequency is the clock's native position units
+// per second; QPC values are monotonic nanoseconds.
+type ClockReport struct {
+	Samples              uint64       `json:"observations"`
+	Frequency            uint64       `json:"frequency"`
+	PositionFirst        uint64       `json:"position_first"`
+	PositionLast         uint64       `json:"position_last"`
+	QPCFirstNano         int64        `json:"qpc_first_ns"`
+	QPCLastNano          int64        `json:"qpc_last_ns"`
+	QPCStepUS            TimingReport `json:"qpc_step_us"`
+	PositionRateErrorPPM float64      `json:"position_rate_error_ppm"`
+}
+
 // Report is a portable snapshot of a loopback run. FakeHost results are
 // marked by Host and describe deterministic virtual behavior, not hardware.
 // WakeIntervalUS and WakeIntervalBuckets describe elapsed observations between
@@ -27,11 +41,18 @@ type TimingReport struct {
 // not device deadline lateness.
 type Report struct {
 	Host                  string       `json:"host"`
+	Mode                  string       `json:"mode,omitempty"`
 	Output                string       `json:"out"`
 	Input                 string       `json:"in"`
 	Rate                  int          `json:"rate"`
 	Period                int          `json:"period"`
 	Periods               int          `json:"periods"`
+	InFormat              string       `json:"in_format,omitempty"`
+	OutFormat             string       `json:"out_format,omitempty"`
+	LatencyInUS           float64      `json:"latency_in_us"`
+	LatencyOutUS          float64      `json:"latency_out_us"`
+	LatencyInSource       string       `json:"latency_in_source,omitempty"`
+	LatencyOutSource      string       `json:"latency_out_source,omitempty"`
 	DurationSeconds       float64      `json:"duration_s"`
 	Load                  []string     `json:"load"`
 	Priority              string       `json:"priority"`
@@ -40,6 +61,9 @@ type Report struct {
 	Late                  uint64       `json:"late"`
 	DropoutsReported      uint64       `json:"dropouts_reported"`
 	BreaksDetected        uint64       `json:"breaks_detected"`
+	Discontinuities       uint64       `json:"discontinuities"`
+	NonZeroOutputSamples  uint64       `json:"output_nonzero_count"`
+	CallbackErrors        uint64       `json:"callback_errors"`
 	Breaks                []Break      `json:"breaks,omitempty"`
 	LatencyMeasuredFrames int          `json:"latency_measured_frames"`
 	LatencyReportedFrames int          `json:"latency_reported_frames"`
@@ -49,7 +73,10 @@ type Report struct {
 	WakeLateBuckets       [32]uint64   `json:"wake_late_buckets"`
 	WakeIntervalBuckets   [32]uint64   `json:"wake_interval_buckets"`
 	CallbackBuckets       [32]uint64   `json:"callback_buckets"`
+	OutputClock           ClockReport  `json:"output_clock"`
+	InputClock            ClockReport  `json:"input_clock"`
 	Allocs                uint64       `json:"allocs"`
+	CallbackLoopAllocs    uint64       `json:"callback_loop_allocs"`
 	RuntimePriority       string       `json:"runtime_priority,omitempty"`
 	Go                    string       `json:"go"`
 	OS                    string       `json:"os"`

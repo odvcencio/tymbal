@@ -36,6 +36,7 @@ type streamStats struct {
 	wakeIntervalMax atomic.Int64
 	callbackMax     atomic.Int64
 	allocs          atomic.Uint64
+	callbackAllocs  atomic.Uint64
 }
 
 // Stream owns a single negotiated audio stream.
@@ -48,10 +49,11 @@ type Stream struct {
 	closeDone chan struct{}
 	closeErr  error
 
-	device driver.Stream
-	cb     Callback
-	cfg    Config
-	actual Actual
+	device       driver.Stream
+	clockSampler driver.ClockSampler
+	cb           Callback
+	cfg          Config
+	actual       Actual
 
 	input   [][]float32
 	output  [][]float32
@@ -159,11 +161,13 @@ func Open(h Host, cfg Config, cb Callback) (*Stream, error) {
 		_ = ds.Close()
 		return nil, ErrFormat
 	}
+	clockSampler, _ := ds.(driver.ClockSampler)
 	s := &Stream{
-		state:  stateOpened,
-		device: ds,
-		cb:     cb,
-		cfg:    cfg,
+		state:        stateOpened,
+		device:       ds,
+		clockSampler: clockSampler,
+		cb:           cb,
+		cfg:          cfg,
 		actual: Actual{
 			SampleRate: p.SampleRate, Period: p.Period, Periods: p.Periods,
 			OutChannels: p.OutChannels, InChannels: p.InChannels,
@@ -437,6 +441,7 @@ func (s *Stream) Stats(dst *Stats) {
 	dst.WakeIntervalMax = time.Duration(s.stats.wakeIntervalMax.Load())
 	dst.CallbackMax = time.Duration(s.stats.callbackMax.Load())
 	dst.AllocsSinceRun = s.stats.allocs.Load() // Process-wide; not attributed to this stream's goroutine.
+	dst.CallbackLoopAllocs = s.stats.callbackAllocs.Load()
 }
 
 func (s *Stream) run() {
@@ -449,8 +454,10 @@ func (s *Stream) run() {
 	s.mu.Unlock()
 	// Setup above may allocate; the loop must not. The watchdog's exact
 	// readings bracket device start and the loop on this thread.
-	stopWatchdog := rt.StartWatchdog(time.Second, func(total uint64) {
+	startCallbackScope, stopWatchdog := rt.StartWatchdogWithScope(time.Second, func(total uint64) {
 		atomicMaxUint64(&s.stats.allocs, total)
+	}, func(total uint64) {
+		atomicMaxUint64(&s.stats.callbackAllocs, total)
 	})
 	if err := s.device.Start(); err != nil {
 		stopWatchdog()
@@ -465,6 +472,7 @@ func (s *Stream) run() {
 		return
 	}
 	close(s.startDone)
+	startCallbackScope()
 	s.loop()
 	stopWatchdog()
 	stopErr := s.device.Stop()
@@ -574,12 +582,18 @@ func (s *Stream) loop() {
 			}
 		}
 		outNano, inNano := s.device.Clock()
+		var clockSample driver.ClockSample
+		if s.clockSampler != nil {
+			clockSample = s.clockSampler.ClockSample()
+		}
 		dropouts := s.stats.dropouts.Load()
 		if dropouts > math.MaxUint32 {
 			dropouts = math.MaxUint32
 		}
 		t := Time{
 			Frame: frame, OutputNano: outNano, InputNano: inNano,
+			OutputPosition: clockSample.OutputPosition, OutputFrequency: clockSample.OutputFrequency,
+			InputPosition: clockSample.InputPosition, InputFrequency: clockSample.InputFrequency,
 			Dropouts: uint32(dropouts), Discontinuity: discontinuity,
 		}
 		atomicSaturatingAdd(&s.stats.callbacks, 1)

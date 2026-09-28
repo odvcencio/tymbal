@@ -26,6 +26,8 @@ func main() {
 		err = loopback(os.Args[2:])
 	case "soak":
 		err = runLoopback(os.Args[2:], true)
+	case "silent-soak":
+		err = silentSoak(os.Args[2:])
 	case "__native-load":
 		err = nativeLoad(os.Args[2:])
 	case "devices":
@@ -53,11 +55,146 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "  devices                 list platform and virtual devices")
 	fmt.Fprintln(w, "  loopback [options]      run fake (default) or explicit native duplex loopback")
 	fmt.Fprintln(w, "  soak [options]          native loopback; defaults to -dur 1h -load cpu,gc")
+	fmt.Fprintln(w, "  silent-soak [options]   zero-output render or duplex soak")
 	fmt.Fprintln(w, "  report report.json...   print report records as a Markdown table")
 	fmt.Fprintln(w, "  tone [options]          play a sine tone on a platform or fake host")
 	fmt.Fprintln(w, "Loopback options: -rate 48000 -period 128 -periods 2 -dur 1s -delay-periods 2 -dropout -json report.json")
 	fmt.Fprintln(w, "Native loopback: -host alsa|wasapi -out ID -in ID -channels 1 -max-delay-periods N -load cpu,gc -runtime-priority 50 -exclusive")
 	fmt.Fprintln(w, "Tone options: -host alsa|wasapi|fake -device ID -rate 48000 -period 256 -periods 2 -channels 2 -freq 997 -dur 10s -exclusive")
+	fmt.Fprintln(w, "Silent soak: -host wasapi -mode render|duplex -period 128 -periods 2 -dur 1h -load cpu,gc [-exclusive]")
+}
+
+func silentSoak(args []string) error {
+	fs := flag.NewFlagSet("silent-soak", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	hostName := fs.String("host", "wasapi", "native audio host")
+	mode := fs.String("mode", "render", "render or duplex")
+	outputID := fs.String("out", "", "render endpoint ID; empty uses the default endpoint")
+	inputID := fs.String("in", "", "capture endpoint ID; empty uses the default endpoint for duplex")
+	rate := fs.Int("rate", 0, "sample rate in Hz; zero uses the endpoint mix rate")
+	period := fs.Int("period", 128, "requested callback period in frames")
+	periods := fs.Int("periods", 2, "requested buffer depth in periods")
+	duration := fs.Duration("dur", time.Hour, "run duration")
+	load := fs.String("load", "cpu,gc", "child-process load generators: cpu,gc")
+	exclusive := fs.Bool("exclusive", false, "request exclusive output; render-only")
+	jsonPath := fs.String("json", "", "write the JSON report to this path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *duration <= 0 || *period <= 0 || *periods <= 0 || (*mode != "render" && *mode != "duplex") {
+		return fmt.Errorf("invalid silent-soak arguments")
+	}
+	if *mode == "render" && *inputID != "" || *mode == "duplex" && *exclusive {
+		return fmt.Errorf("silent-soak mode does not support the requested endpoint options")
+	}
+	var host tymbal.Host
+	for _, candidate := range tymbal.Hosts() {
+		if candidate.Name() == *hostName {
+			host = candidate
+			break
+		}
+	}
+	if host.Name() == "" {
+		return fmt.Errorf("host %q is unavailable", *hostName)
+	}
+	devices, err := host.Devices()
+	if err != nil {
+		return err
+	}
+	output, err := selectEndpoint(host, devices, *outputID, tymbal.Output)
+	if err != nil {
+		return err
+	}
+	var input *tymbal.Device
+	if *mode == "duplex" {
+		selected, err := selectEndpoint(host, devices, *inputID, tymbal.Input)
+		if err != nil {
+			return err
+		}
+		input = &selected
+	}
+	if *rate == 0 {
+		*rate = commonEndpointRate(output, input)
+	}
+	if *rate <= 0 {
+		return fmt.Errorf("selected endpoints have no common advertised mix rate")
+	}
+	config := tymbal.Config{SampleRate: *rate, Period: *period, Periods: *periods, Exclusive: *exclusive}
+	options := tymbaltest.SilentOptions{Duration: *duration, Load: splitLoad(*load)}
+	if len(options.Load) > 0 {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		options.LoadCommand = []string{executable, "__native-load"}
+	}
+	record, runErr := tymbaltest.NativeSilentSoak(host, output, input, config, options)
+	if runErr != nil && record.Host == "" {
+		return runErr
+	}
+	if *exclusive {
+		record.Mode = "exclusive-silent-render"
+	}
+	if *jsonPath != "" {
+		file, err := os.Create(*jsonPath)
+		if err != nil {
+			return err
+		}
+		writeErr := tymbaltest.WriteReport(file, record)
+		closeErr := file.Close()
+		if writeErr != nil {
+			return writeErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	if err := tymbaltest.WriteReport(os.Stdout, record); err != nil {
+		return err
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if !record.Passed {
+		return fmt.Errorf("silent %s soak did not pass its recorded gates", record.Mode)
+	}
+	return nil
+}
+
+func selectEndpoint(host tymbal.Host, devices []tymbal.Device, id string, direction tymbal.Direction) (tymbal.Device, error) {
+	if id == "" {
+		return host.Default(direction)
+	}
+	for _, device := range devices {
+		if device.ID == id && (direction == tymbal.Output && device.Outputs > 0 || direction == tymbal.Input && device.Inputs > 0) {
+			return device, nil
+		}
+	}
+	return tymbal.Device{}, fmt.Errorf("endpoint %q is not an active %s endpoint on %s", id, directionName(direction), host.Name())
+}
+
+func commonEndpointRate(output tymbal.Device, input *tymbal.Device) int {
+	if len(output.SampleRates) == 0 {
+		return 0
+	}
+	if input == nil {
+		return output.SampleRates[0]
+	}
+	for _, outRate := range output.SampleRates {
+		for _, inRate := range input.SampleRates {
+			if outRate == inRate {
+				return outRate
+			}
+		}
+	}
+	return 0
+}
+
+func directionName(direction tymbal.Direction) string {
+	if direction == tymbal.Input {
+		return "capture"
+	}
+	return "render"
 }
 
 func devices() error {
@@ -70,7 +207,17 @@ func devices() error {
 			return fmt.Errorf("%s: %w", host.Name(), err)
 		}
 		for _, d := range list {
-			fmt.Printf("%s\t%s\tin=%d\tout=%d\thost=%s\n", d.ID, d.Name, d.Inputs, d.Outputs, d.Host)
+			flow, channels, isDefault := "capture", d.Inputs, d.Default&tymbal.Input != 0
+			if d.Outputs > 0 {
+				flow, channels, isDefault = "render", d.Outputs, d.Default&tymbal.Output != 0
+			}
+			rate := 0
+			if len(d.SampleRates) > 0 {
+				rate = d.SampleRates[0]
+			}
+			fmt.Printf("%s\t%s\tflow=%s\tdefault=%t\tchannels=%d\tmix=%dHz/%s/%dbit\tperiods=min:%d/default:%d/max:%d/fundamental:%d\thost=%s\n",
+				d.ID, d.Name, flow, isDefault, channels, rate, d.MixFormat, d.MixBits,
+				d.MinPeriod, d.DefaultPeriod, d.MaxPeriod, d.FundamentalPeriod, d.Host)
 		}
 	}
 	return nil

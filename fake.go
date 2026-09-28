@@ -102,8 +102,10 @@ func NewFakeHost(cfg FakeConfig) (Host, *FakeControl) {
 	for i, d := range cfg.Devices {
 		state.devices[i] = driver.Info{
 			ID: d.ID, Name: d.Name, Inputs: d.Inputs, Outputs: d.Outputs,
+			MixFormat: d.MixFormat, MixBits: d.MixBits,
 			SampleRates: append([]int(nil), d.SampleRates...),
 			MinPeriod:   d.MinPeriod, MaxPeriod: d.MaxPeriod,
+			DefaultPeriod: d.DefaultPeriod, FundamentalPeriod: d.FundamentalPeriod,
 			Default: uint8(d.Default), Exclusive: d.Exclusive,
 		}
 	}

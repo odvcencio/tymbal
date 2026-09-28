@@ -337,6 +337,10 @@ func checkFunction(fset *token.FileSet, fn *ast.FuncDecl, imports map[string]str
 				switch call.Sel.Name {
 				case "Lock", "Unlock", "RLock", "RUnlock", "TryLock", "TryRLock":
 					report(n, "lock operation on real-time path")
+				case "Call":
+					// syscall.LazyProc.Call is variadic and builds an argument slice.
+					// Real-time Windows code should use a fixed-arity syscall entry point.
+					report(n, "variadic procedure Call on real-time path")
 				}
 				if pkg, ok := call.X.(*ast.Ident); ok {
 					if path, imported := imports[pkg.Name]; imported {

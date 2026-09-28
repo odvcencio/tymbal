@@ -44,8 +44,11 @@ func TestWindowsEndpointEnumeration(t *testing.T) {
 		if (device.Inputs > 0) == (device.Outputs > 0) {
 			t.Fatalf("endpoint should describe exactly one data flow: %+v", device)
 		}
-		if len(device.SampleRates) != 1 || device.SampleRates[0] <= 0 {
-			t.Fatalf("endpoint has invalid mix-rate metadata: %+v", device)
+		if len(device.SampleRates) != 1 || device.SampleRates[0] <= 0 || device.MixFormat == "" || device.MixBits <= 0 {
+			t.Fatalf("endpoint has invalid mix-format metadata: %+v", device)
+		}
+		if device.MinPeriod <= 0 || device.DefaultPeriod < device.MinPeriod || device.MaxPeriod < device.DefaultPeriod || device.FundamentalPeriod <= 0 {
+			t.Fatalf("endpoint has invalid shared-period metadata: %+v", device)
 		}
 		seen[device.ID] = device
 	}

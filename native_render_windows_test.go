@@ -4,11 +4,13 @@ package tymbal_test
 
 import (
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"m31labs.dev/tymbal"
+	"m31labs.dev/tymbal/internal/rt"
 )
 
 func TestNativePublicRender(t *testing.T) {
@@ -76,6 +78,7 @@ func testNativePublicRender(t *testing.T, exclusive bool, requestedPeriod int) {
 		t.Fatalf("open required render stream: %v", err)
 	}
 	defer stream.Close()
+	warmNativeWindowsThreads()
 	actual := stream.Actual()
 	actualPeriod = actual.Period
 	if actual.OutChannels != output.Outputs || actual.InChannels != 0 || actualPeriod <= 0 {
@@ -84,7 +87,10 @@ func testNativePublicRender(t *testing.T, exclusive bool, requestedPeriod int) {
 	if err := stream.Start(); err != nil {
 		t.Fatalf("start required render stream: %v", err)
 	}
-	time.Sleep(time.Second)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		rt.SleepThread(10 * time.Millisecond)
+	}
 	for i := 0; i < 2; i++ {
 		if err := stream.Stop(); err != nil {
 			t.Fatalf("stop %d: %v", i, err)
@@ -103,8 +109,26 @@ func testNativePublicRender(t *testing.T, exclusive bool, requestedPeriod int) {
 	if callbacks.Load() < 2 || stats.Callbacks != callbacks.Load() || invalid.Load() {
 		t.Fatalf("incomplete render callbacks: observed=%d reported=%d invalid=%t", callbacks.Load(), stats.Callbacks, invalid.Load())
 	}
+	if stats.CallbackLoopAllocs != 0 {
+		t.Fatalf("native render callback loop allocated %d objects, want zero", stats.CallbackLoopAllocs)
+	}
 	actual = stream.Actual()
-	t.Logf("WASAPI render: exclusive=%t requested_period=%d rate=%d period=%d periods=%d channels=%d format=%s latency_out=%s callbacks=%d dropouts=%d priority=%s",
+	t.Logf("WASAPI render: exclusive=%t requested_period=%d rate=%d period=%d periods=%d channels=%d format=%s latency_out=%s callbacks=%d dropouts=%d callback_loop_allocs=%d priority=%s",
 		exclusive, requestedPeriod, actual.SampleRate, actual.Period, actual.Periods, actual.OutChannels, actual.OutFormat, actual.LatencyOut,
-		stats.Callbacks, stats.Dropouts, actual.Priority)
+		stats.Callbacks, stats.Dropouts, stats.CallbackLoopAllocs, actual.Priority)
+}
+
+func warmNativeWindowsThreads() {
+	var wait sync.WaitGroup
+	until := time.Now().Add(50 * time.Millisecond)
+	for range 12 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if delay := time.Until(until); delay > 0 {
+				rt.SleepThread(delay)
+			}
+		}()
+	}
+	wait.Wait()
 }
