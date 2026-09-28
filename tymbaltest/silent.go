@@ -71,7 +71,7 @@ func (c *silentClockTracker) report() ClockReport {
 type silentMetrics struct {
 	period, inChannels, outChannels int
 	callbacks                       uint64
-	processedFrames                 uint64
+	processedFrames                 atomic.Uint64 // written by the callback, polled by the runner
 	discontinuities                 uint64
 	nonzeroOutputSamples            uint64
 	callbackErrors                  uint64
@@ -81,7 +81,7 @@ type silentMetrics struct {
 
 //tymbal:rt
 func (m *silentMetrics) callback(t tymbal.Time, input, output [][]float32) {
-	if t.Frame != m.processedFrames || len(input) != m.inChannels || len(output) != m.outChannels {
+	if t.Frame != m.processedFrames.Load() || len(input) != m.inChannels || len(output) != m.outChannels {
 		m.callbackErrors++
 	}
 	for _, channel := range input {
@@ -110,7 +110,7 @@ func (m *silentMetrics) callback(t tymbal.Time, input, output [][]float32) {
 		m.inputClock.observe(t.InputPosition, t.InputFrequency, t.InputNano)
 	}
 	m.callbacks++
-	m.processedFrames += uint64(m.period)
+	m.processedFrames.Add(uint64(m.period))
 }
 
 // NativeSilentSoak runs silent render or shared duplex on the selected host.
@@ -183,7 +183,7 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 	frames = uint64(roundUp(int(frames), actual.Period))
 	deadline := time.Now().Add(opts.Duration + 5*time.Second)
 	var runErr error
-	for metrics.processedFrames < frames {
+	for metrics.processedFrames.Load() < frames {
 		if worker != nil && worker.exited.Load() {
 			runErr = fmt.Errorf("silent soak load worker exited early: %v", worker.wait())
 			break
@@ -226,7 +226,7 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 		LatencyInUS:     float64(actual.LatencyIn) / float64(time.Microsecond),
 		LatencyOutUS:    float64(actual.LatencyOut) / float64(time.Microsecond),
 		LatencyInSource: latencyInSource, LatencyOutSource: latencyOutSource,
-		DurationSeconds: float64(metrics.processedFrames) / float64(actual.SampleRate),
+		DurationSeconds: float64(metrics.processedFrames.Load()) / float64(actual.SampleRate),
 		Load:            append([]string(nil), opts.Load...), Priority: actual.Priority,
 		RuntimePriority:   runtimePriority,
 		DeadlineAvailable: actual.HasDeadline, Callbacks: stats.Callbacks,
@@ -249,7 +249,7 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 	if metrics.outputClock.invalid || metrics.inputClock.invalid {
 		runErr = errors.Join(runErr, fmt.Errorf("silent soak observed a non-monotonic or changing device clock sample"))
 	}
-	record.Passed = runErr == nil && metrics.processedFrames >= frames && stats.Dropouts == 0 &&
+	record.Passed = runErr == nil && metrics.processedFrames.Load() >= frames && stats.Dropouts == 0 &&
 		metrics.discontinuities == 0 && metrics.nonzeroOutputSamples == 0 && stats.CallbackLoopAllocs == 0 &&
 		(!actual.HasDeadline || metrics.outputClock.samples > 1 && (input == nil || metrics.inputClock.samples > 1))
 	if actual.HasDeadline {
