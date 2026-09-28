@@ -320,6 +320,18 @@ func TestPCMDuplexLinksBeforePrimingAndRunsBothSides(t *testing.T) {
 	}
 }
 
+func TestPCMDuplexLatencyReportsRoundTripBufferOnce(t *testing.T) {
+	fake := &fakePCM{}
+	p := pcmTestParams(1, 256, 2, format.F32LE)
+	s := openTestPCM(t, 111, 112, p, p, fake)
+
+	got := s.Params().LatencyOut + s.Params().LatencyIn
+	want := time.Duration(p.bufferFrames * uint64(time.Second) / uint64(p.rate))
+	if got != want {
+		t.Fatalf("duplex reported latency = %s, want %s (%d-frame round trip)", got, want, p.bufferFrames)
+	}
+}
+
 func TestPCMDuplexWaitMasksReadyEndpointWhileWaitingForPeer(t *testing.T) {
 	fake := &fakePCM{}
 	outP := pcmTestParams(1, 4, 2, format.S16LE)

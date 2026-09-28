@@ -214,7 +214,8 @@ func pcmLatency(p pcmParams) time.Duration {
 	if frames == 0 {
 		frames = uint64(p.period) * uint64(p.periods)
 	}
-	return time.Duration(frames * uint64(time.Second) / uint64(p.rate))
+	// Each side contributes half of its PCM buffer to a duplex round trip.
+	return time.Duration(frames * uint64(time.Second) / uint64(p.rate) / 2)
 }
 
 func newPCMEndpoint(fd int, p pcmParams, req uintptr) (pcmEndpoint, error) {
