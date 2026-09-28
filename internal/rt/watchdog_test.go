@@ -59,6 +59,39 @@ func TestWatchdogExcludesAllocationsMadeBeforeStart(t *testing.T) {
 	}
 }
 
+func TestWatchdogScopeExcludesAllocationsBeforeScope(t *testing.T) {
+	runtime.GC()
+	const before, during = 100, 1000
+	var total, scoped maxTotal
+	startScope, stop := StartWatchdogWithScope(time.Hour, total.report, scoped.report)
+	for i := 0; i < before; i++ {
+		watchdogSink = new([4]uint64)
+	}
+	startScope()
+	for i := 0; i < during; i++ {
+		watchdogSink = new([4]uint64)
+	}
+	stop()
+	if got := total.v.Load(); got < before+during {
+		t.Fatalf("whole-run watchdog reported %d allocations, want at least %d", got, before+during)
+	}
+	// The slack covers incidental runtime allocations, such as a new thread.
+	if got := scoped.v.Load(); got < during || got >= during+before/2 {
+		t.Fatalf("scoped watchdog reported %d allocations, want about the %d made after scope start", got, during)
+	}
+}
+
+func TestWatchdogScopeStartDoesNotCountItsBaseline(t *testing.T) {
+	runtime.GC()
+	var scoped maxTotal
+	startScope, stop := StartWatchdogWithScope(time.Hour, nil, scoped.report)
+	startScope()
+	stop()
+	if got := scoped.v.Load(); got != 0 {
+		t.Fatalf("scope counted %d allocations without work after its baseline, want 0", got)
+	}
+}
+
 // After stop reports the exact total, a sampler reading never raises it.
 func TestWatchdogSamplerNeverReportsAfterStop(t *testing.T) {
 	var total maxTotal

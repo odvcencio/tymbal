@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"m31labs.dev/tymbal/internal/driver"
+	"m31labs.dev/tymbal/internal/format"
 )
 
 const (
@@ -43,6 +44,8 @@ const (
 	audioClientStop                              = 11
 	audioClientSetEventHandle                    = 13
 	audioClientGetService                        = 14
+	audioClockGetFrequency                       = 3
+	audioClockGetPosition                        = 4
 	audioClient3GetSharedModeEnginePeriod        = 18
 	audioClient3GetCurrentSharedModeEnginePeriod = 19
 	audioClient3InitializeSharedAudioStream      = 20
@@ -65,6 +68,7 @@ var (
 	iidMMDeviceEnumerator   = guid{0xa95664d2, 0x9614, 0x4f35, [8]byte{0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}}
 	iidAudioClient          = guid{0x1cb9ad4c, 0xdbfa, 0x4c32, [8]byte{0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2}}
 	iidAudioClient3         = guid{0x7ed4ee07, 0x8e67, 0x4cd4, [8]byte{0x8c, 0x1a, 0x2b, 0x7a, 0x59, 0x87, 0xad, 0x42}}
+	iidAudioClock           = guid{0xcd63314f, 0x3fba, 0x4a1b, [8]byte{0x81, 0x2c, 0xef, 0x96, 0x35, 0x87, 0x28, 0xe7}}
 	iidAudioRenderClient    = guid{0xf294acfc, 0x3146, 0x4483, [8]byte{0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2, 0x60, 0xe2}}
 	iidAudioCaptureClient   = guid{0xc8adbd64, 0xe71e, 0x48a0, [8]byte{0xa4, 0xde, 0x18, 0x5c, 0x39, 0x5c, 0xd3, 0x17}}
 
@@ -330,13 +334,13 @@ func inspectEndpoint(endpoint uintptr, direction uint8) (driver.Info, error) {
 
 	var audioClient uintptr
 	hr := comCall4(endpoint, immDeviceActivate,
-		uintptr(unsafe.Pointer(&iidAudioClient)),
+		uintptr(unsafe.Pointer(&iidAudioClient3)),
 		clsctxAll,
 		0,
 		uintptr(unsafe.Pointer(&audioClient)))
-	runtime.KeepAlive(&iidAudioClient)
+	runtime.KeepAlive(&iidAudioClient3)
 	runtime.KeepAlive(&audioClient)
-	if err := checkHRESULT("IMMDevice.Activate(IAudioClient)", hr); err != nil {
+	if err := checkHRESULT("IMMDevice.Activate(IAudioClient3)", hr); err != nil {
 		release(audioClient)
 		return driver.Info{}, err
 	}
@@ -358,14 +362,20 @@ func inspectEndpoint(endpoint uintptr, direction uint8) (driver.Info, error) {
 		return driver.Info{}, errors.New("tymbal wasapi: mix format lookup returned nil")
 	}
 	defer procCoTaskMemFree.Call(mixFormat)
-	wave := (*waveFormatEx)(unsafe.Pointer(mixFormat))
-	channels := int(wave.channels)
-	rate := int(wave.samplesPerSec)
-	if channels <= 0 || rate <= 0 {
-		return driver.Info{}, fmt.Errorf("tymbal wasapi: invalid endpoint mix format: %d channels at %d Hz", channels, rate)
+	_, sampleFormat, channels, rate, err := describeWaveFormat(mixFormat)
+	if err != nil {
+		return driver.Info{}, err
 	}
-
-	info := driver.Info{ID: id, Name: name, SampleRates: []int{rate}}
+	periods, err := getSharedPeriodRange(audioClient, mixFormat)
+	if err != nil {
+		return driver.Info{}, err
+	}
+	info := driver.Info{
+		ID: id, Name: name, SampleRates: []int{rate},
+		MixFormat: string(sampleFormat), MixBits: format.BytesPerSample(sampleFormat) * 8,
+		MinPeriod: int(periods.minFrames), MaxPeriod: int(periods.maxFrames),
+		DefaultPeriod: int(periods.defaultFrames), FundamentalPeriod: int(periods.fundamentalFrames),
+	}
 	if direction == 1 {
 		info.Outputs = channels
 	} else {

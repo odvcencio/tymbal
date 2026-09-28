@@ -83,29 +83,42 @@ func LockProcessMemory() error { return ErrUnsupported }
 // Call StartWatchdog after setup allocation and before the real-time loop.
 // Call stop after the loop exits and before cleanup allocates.
 func StartWatchdog(every time.Duration, report func(total uint64)) (stop func()) {
+	_, stop = StartWatchdogWithScope(every, report, nil)
+	return stop
+}
+
+// StartWatchdogWithScope counts the whole run as StartWatchdog does and also
+// offers a second exact scope that can begin after backend setup and before
+// the real-time loop. startScope must be called once before stop.
+func StartWatchdogWithScope(every time.Duration, report, scopeReport func(total uint64)) (startScope func(), stop func()) {
 	if every <= 0 {
 		every = time.Second
 	}
-	w := &allocWatchdog{report: report, interval: every}
+	w := &allocWatchdog{report: report, scopeReport: scopeReport, interval: every}
 	w.samples[0].Name = "/gc/heap/allocs:objects"
 	w.samples[1].Name = "/gc/heap/tiny/allocs:objects"
 	metrics.Read(w.samples[:]) // The first read in a process builds the runtime's metric table.
 	stop = w.stop
+	startScope = w.startScope
 	go w.sample()
 	// The watchdog allocates nothing after this reading.
 	w.baseline = publishedAllocs()
 	w.counting.Store(true)
-	return stop
+	return startScope, stop
 }
 
 type allocWatchdog struct {
-	samples  [2]metrics.Sample // used by the sampler only, after StartWatchdog returns
-	baseline uint64            // written before counting is set
-	counting atomic.Bool
-	stopped  atomic.Bool
-	reported atomic.Uint64 // largest total passed to report
-	report   func(total uint64)
-	interval time.Duration
+	samples       [2]metrics.Sample // used by the sampler only, after StartWatchdog returns
+	baseline      uint64            // written before counting is set
+	scopeBaseline uint64            // written before scopeCounting is set
+	counting      atomic.Bool
+	scopeCounting atomic.Bool
+	stopped       atomic.Bool
+	reported      atomic.Uint64 // largest total passed to report
+	scopeReported atomic.Uint64
+	report        func(total uint64)
+	scopeReport   func(total uint64)
+	interval      time.Duration
 }
 
 // samplerSlice bounds how long the sampler outlives stop, holding a thread.
@@ -130,6 +143,9 @@ func (w *allocWatchdog) sample() {
 			return
 		}
 		w.update(current)
+		if w.scopeCounting.Load() {
+			w.updateScope(current)
+		}
 	}
 }
 
@@ -138,7 +154,19 @@ func (w *allocWatchdog) stop() {
 	if w.stopped.Swap(true) {
 		return
 	}
-	w.update(publishedAllocs())
+	current := publishedAllocs()
+	w.update(current)
+	if w.scopeCounting.Load() {
+		w.updateScope(current)
+	}
+}
+
+func (w *allocWatchdog) startScope() {
+	if w.scopeCounting.Load() {
+		return
+	}
+	w.scopeBaseline = publishedAllocs()
+	w.scopeCounting.Store(true)
 }
 
 // update reports a larger total than any reported before.
@@ -155,6 +183,25 @@ func (w *allocWatchdog) update(current uint64) {
 		if w.reported.CompareAndSwap(old, total) {
 			if w.report != nil {
 				w.report(total)
+			}
+			return
+		}
+	}
+}
+
+func (w *allocWatchdog) updateScope(current uint64) {
+	if current <= w.scopeBaseline {
+		return
+	}
+	total := current - w.scopeBaseline
+	for {
+		old := w.scopeReported.Load()
+		if total <= old {
+			return
+		}
+		if w.scopeReported.CompareAndSwap(old, total) {
+			if w.scopeReport != nil {
+				w.scopeReport(total)
 			}
 			return
 		}

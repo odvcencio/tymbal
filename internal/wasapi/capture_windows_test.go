@@ -38,9 +38,15 @@ func TestCaptureStagerAssemblesVariablePacketsIntoWholePeriods(t *testing.T) {
 	if stager.activeQPCPosition != 1000 || !stager.activeQPCPositionValid {
 		t.Fatalf("first period QPC = (%d, %v), want (1000, true)", stager.activeQPCPosition, stager.activeQPCPositionValid)
 	}
+	if stager.activeDevicePosition != 100 || !stager.activeDevicePositionValid {
+		t.Fatalf("first period device position = (%d, %v), want (100, true)", stager.activeDevicePosition, stager.activeDevicePositionValid)
+	}
 	stager.commitPeriod()
 	if stager.frames != 1 || stager.stageDevicePosition != 104 || stager.stageQPCPosition != 1004 {
 		t.Fatalf("after first commit: frames=%d device=%d qpc=%d, want 1/104/1004", stager.frames, stager.stageDevicePosition, stager.stageQPCPosition)
+	}
+	if stager.activeDevicePositionValid {
+		t.Fatal("committed period retained an active device position")
 	}
 	if err := stager.appendPacket([]byte{10, 11, 12, 13, 14, 15}, 3, 0, 105, 1005); err != nil {
 		t.Fatal(err)
@@ -98,6 +104,26 @@ func TestCaptureStagerSilenceDiscontinuityAndTimestampError(t *testing.T) {
 	}
 	if stager.activeQPCPositionValid || stager.stageDevicePositionValid {
 		t.Fatal("timestamp-error packet exposed an invalid capture position")
+	}
+}
+
+func TestCaptureStagerIgnoresDiscontinuityOnFirstPacket(t *testing.T) {
+	stager, err := newCaptureStager(8, 2, 2, 48_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flagged := uint32(audclntCaptureBufferFlagDataDiscontinuity)
+	if err := stager.appendPacket([]byte{1, 2, 3, 4}, 2, flagged, 10, 100); err != nil {
+		t.Fatal(err)
+	}
+	if stager.dropouts != 0 {
+		t.Fatalf("first packet discontinuity counted %d dropouts, want 0", stager.dropouts)
+	}
+	if err := stager.appendPacket([]byte{5, 6, 7, 8}, 2, flagged, 12, 102); err != nil {
+		t.Fatal(err)
+	}
+	if stager.dropouts != 1 {
+		t.Fatalf("later packet discontinuity counted %d dropouts, want 1", stager.dropouts)
 	}
 }
 

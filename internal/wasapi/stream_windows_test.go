@@ -119,6 +119,31 @@ func TestSharedPeriodAndBufferGeometry(t *testing.T) {
 	}
 }
 
+func TestAudioClockDeadlineUsesCumulativeFrameOffset(t *testing.T) {
+	start := uint64(8_000_000_000)
+	first, ok := audioClockDeadlineQPC(start, 128, 44_100)
+	if !ok || first-start != 29_024 {
+		t.Fatalf("first deadline delta = %d, valid=%t; want 29024 100-ns units", first-start, ok)
+	}
+	frames := uint64(128 * 10_000)
+	last, ok := audioClockDeadlineQPC(start, frames, 44_100)
+	if !ok || last-start != frames*10_000_000/44_100 {
+		t.Fatalf("cumulative deadline delta = %d, valid=%t", last-start, ok)
+	}
+	if _, ok := audioClockDeadlineQPC(^uint64(0)-1, 128, 48_000); ok {
+		t.Fatal("deadline overflow was accepted")
+	}
+}
+
+func TestQPCToMonotonicNano(t *testing.T) {
+	if got := qpcToMonotonicNano(12_345, -1_000_000); got != 234_500 {
+		t.Fatalf("qpcToMonotonicNano = %d, want 234500", got)
+	}
+	if got := qpcToMonotonicNano(^uint64(0), 0); got != 0 {
+		t.Fatalf("overflow conversion = %d, want zero", got)
+	}
+}
+
 func TestNativeSharedRenderEventAndInterrupt(t *testing.T) {
 	devices, err := New().Devices()
 	if err != nil {

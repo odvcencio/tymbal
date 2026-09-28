@@ -126,6 +126,9 @@ func TestAllocsSinceRunCountsLoopAllocationsInShortRun(t *testing.T) {
 	if stats.AllocsSinceRun < periods {
 		t.Fatalf("AllocsSinceRun = %d after %d allocating callbacks, want at least %d", stats.AllocsSinceRun, periods, periods)
 	}
+	if stats.CallbackLoopAllocs < periods {
+		t.Fatalf("CallbackLoopAllocs = %d after %d allocating callbacks, want at least %d", stats.CallbackLoopAllocs, periods, periods)
+	}
 }
 
 // Startup allocation (thread priority, the watchdog itself) happens before the
@@ -137,6 +140,9 @@ func TestAllocsSinceRunIsZeroForAllocationFreeLoop(t *testing.T) {
 		}
 	})
 	if stats.AllocsSinceRun != 0 {
-		t.Fatalf("AllocsSinceRun = %d for an allocation-free loop, want 0", stats.AllocsSinceRun)
+		t.Fatalf("AllocsSinceRun = %d, CallbackLoopAllocs = %d for an allocation-free loop, want both 0", stats.AllocsSinceRun, stats.CallbackLoopAllocs)
+	}
+	if stats.CallbackLoopAllocs != 0 {
+		t.Fatalf("CallbackLoopAllocs = %d for an allocation-free loop, want 0", stats.CallbackLoopAllocs)
 	}
 }

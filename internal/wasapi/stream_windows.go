@@ -55,14 +55,15 @@ type sharedPeriodRange struct {
 }
 
 type renderProbe struct {
-	formatBytes  []byte
-	format       format.Format
-	rate         int
-	channels     int
-	period       int
-	periods      int
-	bufferFrames uint32
-	latency      time.Duration
+	formatBytes    []byte
+	format         format.Format
+	rate           int
+	channels       int
+	period         int
+	periods        int
+	bufferFrames   uint32
+	latency        time.Duration
+	clockFrequency uint64
 }
 
 // wasapiStream contains plain negotiated data until Start. Start creates all
@@ -73,17 +74,27 @@ type wasapiStream struct {
 	wave     []byte
 	out      []byte
 
-	enumerator     uintptr
-	device         uintptr
-	client         uintptr
-	render         uintptr
-	audioEvent     uintptr
-	interruptEvent uintptr
-	waitProc       uintptr
-	waitHandles    [2]uintptr
-	bufferFrames   uint32
-	renderBuffer   uintptr // reusable COM output slot; its address stays off the stack
-	renderPadding  uint32
+	enumerator          uintptr
+	device              uintptr
+	client              uintptr
+	render              uintptr
+	audioClock          uintptr
+	audioEvent          uintptr
+	interruptEvent      uintptr
+	waitProc            uintptr
+	waitHandles         [2]uintptr
+	bufferFrames        uint32
+	renderBuffer        uintptr // reusable COM output slot; its address stays off the stack
+	renderPadding       uint32
+	clockFrequency      uint64
+	clockPosition       uint64
+	clockQPC100ns       uint64
+	clockQPCOffset      int64
+	clockQPCValid       bool
+	clockStartQPC       uint64
+	clockDeadlineFrames uint64
+	clockDueNano        int64
+	clockDeadlineNano   int64
 
 	comInitialized bool
 	clientStarted  bool
@@ -122,7 +133,7 @@ func openRenderStream(req driver.Request) (driver.Stream, error) {
 	params := driver.Params{
 		SampleRate: probe.rate, Period: probe.period, Periods: probe.periods,
 		OutChannels: probe.channels, OutFormat: probe.format,
-		LatencyOut: probe.latency,
+		LatencyOut: probe.latency, HasDeadline: true,
 	}
 	bytesPerSample := format.BytesPerSample(probe.format)
 	maxInt := int(^uint(0) >> 1)
@@ -131,11 +142,12 @@ func openRenderStream(req driver.Request) (driver.Stream, error) {
 	}
 	outBytes := probe.period * probe.channels * bytesPerSample
 	return &wasapiStream{
-		deviceID:     req.Output.ID,
-		params:       params,
-		wave:         probe.formatBytes,
-		out:          make([]byte, outBytes),
-		bufferFrames: probe.bufferFrames,
+		deviceID:       req.Output.ID,
+		params:         params,
+		wave:           probe.formatBytes,
+		out:            make([]byte, outBytes),
+		bufferFrames:   probe.bufferFrames,
+		clockFrequency: probe.clockFrequency,
 	}, nil
 }
 
@@ -219,16 +231,26 @@ func probeRender(req driver.Request) (renderProbe, error) {
 	if err != nil {
 		return renderProbe{}, err
 	}
+	clock, err := getAudioClock(client)
+	if err != nil {
+		return renderProbe{}, err
+	}
+	clockFrequency, err := getAudioClockFrequency(clock)
+	release(clock)
+	if err != nil {
+		return renderProbe{}, err
+	}
 
 	return renderProbe{
-		formatBytes:  waveBytes,
-		format:       sampleFormat,
-		rate:         rate,
-		channels:     channels,
-		period:       int(period),
-		periods:      periodCount,
-		bufferFrames: bufferFrames,
-		latency:      latency,
+		formatBytes:    waveBytes,
+		format:         sampleFormat,
+		rate:           rate,
+		channels:       channels,
+		period:         int(period),
+		periods:        periodCount,
+		bufferFrames:   bufferFrames,
+		latency:        latency,
+		clockFrequency: clockFrequency,
 	}, nil
 }
 
@@ -259,6 +281,27 @@ func (s *wasapiStream) Start() error {
 		return errWithCleanup(err, cleanupErr)
 	}
 	s.clientStarted = true
+	s.clockQPCOffset, s.clockQPCValid = captureQPCOffset()
+	if !s.clockQPCValid {
+		cleanupErr := s.cleanupOnStreamThread()
+		s.stopped = true
+		return errWithCleanup(fmt.Errorf("tymbal wasapi: map QPC to monotonic time"), cleanupErr)
+	}
+	if err := s.sampleAudioClock(); err != nil {
+		cleanupErr := s.cleanupOnStreamThread()
+		s.stopped = true
+		return errWithCleanup(err, cleanupErr)
+	}
+	s.clockStartQPC = s.clockQPC100ns
+	s.clockDueNano = qpcToMonotonicNano(s.clockQPC100ns, s.clockQPCOffset)
+	s.clockDeadlineFrames = uint64(s.params.Period)
+	deadlineQPC, ok := audioClockDeadlineQPC(s.clockStartQPC, s.clockDeadlineFrames, s.params.SampleRate)
+	if !ok || s.clockDueNano == 0 {
+		cleanupErr := s.cleanupOnStreamThread()
+		s.stopped = true
+		return errWithCleanup(fmt.Errorf("tymbal wasapi: invalid initial audio clock deadline"), cleanupErr)
+	}
+	s.clockDeadlineNano = qpcToMonotonicNano(deadlineQPC, s.clockQPCOffset)
 	s.started = true
 	if s.interruptRequested.Load() {
 		s.interruptMu.Lock()
@@ -353,6 +396,18 @@ func (s *wasapiStream) openOnStreamThread() error {
 		return err
 	}
 	s.render = render
+	clock, err := getAudioClock(client)
+	if err != nil {
+		return err
+	}
+	s.audioClock = clock
+	clockFrequency, err := getAudioClockFrequency(clock)
+	if err != nil {
+		return err
+	}
+	if clockFrequency == 0 || clockFrequency != s.clockFrequency {
+		return fmt.Errorf("%w: WASAPI audio clock frequency changed from %d to %d", driver.ErrFormat, s.clockFrequency, clockFrequency)
+	}
 	return nil
 }
 
@@ -403,6 +458,19 @@ func (s *wasapiStream) Wait() error {
 			if s.interruptRequested.Load() {
 				return driver.ErrInterrupted
 			}
+			if err := s.sampleAudioClock(); err != nil {
+				return err
+			}
+			s.clockDueNano = qpcToMonotonicNano(s.clockQPC100ns, s.clockQPCOffset)
+			deadlineQPC, ok := audioClockDeadlineQPC(s.clockStartQPC, s.clockDeadlineFrames, s.params.SampleRate)
+			if !ok || s.clockDueNano == 0 || deadlineQPC == 0 {
+				return fmt.Errorf("tymbal wasapi: invalid audio clock deadline")
+			}
+			s.clockDeadlineNano = qpcToMonotonicNano(deadlineQPC, s.clockQPCOffset)
+			if s.clockDeadlineFrames > ^uint64(0)-uint64(s.params.Period) || s.clockDeadlineNano == 0 {
+				return fmt.Errorf("tymbal wasapi: audio clock deadline overflow")
+			}
+			s.clockDeadlineFrames += uint64(s.params.Period)
 			s.ready = true
 			return nil
 		}
@@ -474,9 +542,24 @@ func (s *wasapiStream) Commit() error {
 	return nil
 }
 
-func (s *wasapiStream) Clock() (outNano, inNano int64) { return 0, 0 }
+func (s *wasapiStream) Clock() (outNano, inNano int64) {
+	if !s.clockQPCValid {
+		return 0, 0
+	}
+	return qpcToMonotonicNano(s.clockQPC100ns, s.clockQPCOffset), 0
+}
 
-func (s *wasapiStream) Deadlines() (wakeNano, commitNano int64) { return 0, 0 }
+func (s *wasapiStream) ClockSample() driver.ClockSample {
+	outNano, _ := s.Clock()
+	return driver.ClockSample{
+		OutputPosition: s.clockPosition, OutputFrequency: s.clockFrequency,
+		OutputQPCNano: outNano,
+	}
+}
+
+func (s *wasapiStream) Deadlines() (wakeNano, commitNano int64) {
+	return s.clockDeadlineNano, s.clockDueNano
+}
 
 func (s *wasapiStream) Dropouts() uint64 { return s.dropouts }
 
@@ -499,6 +582,8 @@ func (s *wasapiStream) cleanupOnStreamThread() error {
 		}
 		s.clientStarted = false
 	}
+	release(s.audioClock)
+	s.audioClock = 0
 	release(s.render)
 	s.render = 0
 	release(s.client)
@@ -533,6 +618,72 @@ func (s *wasapiStream) cleanupOnStreamThread() error {
 }
 
 func (s *wasapiStream) Close() error { return nil }
+
+func getAudioClock(client uintptr) (uintptr, error) {
+	var clock uintptr
+	hr := comCall2(client, audioClientGetService,
+		uintptr(unsafe.Pointer(&iidAudioClock)), uintptr(unsafe.Pointer(&clock)))
+	runtime.KeepAlive(&iidAudioClock)
+	runtime.KeepAlive(&clock)
+	if err := checkHRESULT("IAudioClient.GetService(IAudioClock)", hr); err != nil {
+		release(clock)
+		return 0, err
+	}
+	if clock == 0 {
+		return 0, fmt.Errorf("tymbal wasapi: IAudioClock service returned nil")
+	}
+	return clock, nil
+}
+
+func getAudioClockFrequency(clock uintptr) (uint64, error) {
+	var frequency uint64
+	hr := comCall1(clock, audioClockGetFrequency, uintptr(unsafe.Pointer(&frequency)))
+	runtime.KeepAlive(&frequency)
+	if err := checkHRESULT("IAudioClock.GetFrequency", hr); err != nil {
+		return 0, err
+	}
+	if frequency == 0 {
+		return 0, fmt.Errorf("tymbal wasapi: IAudioClock returned a zero frequency")
+	}
+	return frequency, nil
+}
+
+func (s *wasapiStream) sampleAudioClock() error {
+	hr := comCall2(s.audioClock, audioClockGetPosition,
+		uintptr(unsafe.Pointer(&s.clockPosition)), uintptr(unsafe.Pointer(&s.clockQPC100ns)))
+	runtime.KeepAlive(s)
+	if err := checkHRESULT("IAudioClock.GetPosition", hr); err != nil {
+		return err
+	}
+	if s.clockQPC100ns == 0 {
+		return fmt.Errorf("tymbal wasapi: IAudioClock returned a zero QPC timestamp")
+	}
+	return nil
+}
+
+func qpcToMonotonicNano(qpc100ns uint64, offset int64) int64 {
+	maxInt64 := int64(^uint64(0) >> 1)
+	minInt64 := -maxInt64 - 1
+	if qpc100ns > uint64(maxInt64/100) {
+		return 0
+	}
+	qpcNano := int64(qpc100ns * 100)
+	if offset > 0 && qpcNano > maxInt64-offset || offset < 0 && qpcNano < minInt64-offset {
+		return 0
+	}
+	return qpcNano + offset
+}
+
+func audioClockDeadlineQPC(startQPC100ns, frames uint64, rate int) (uint64, bool) {
+	if rate <= 0 || frames > ^uint64(0)/10_000_000 {
+		return 0, false
+	}
+	delta := frames * 10_000_000 / uint64(rate)
+	if startQPC100ns > ^uint64(0)-delta {
+		return 0, false
+	}
+	return startQPC100ns + delta, true
+}
 
 func getDevice(enumerator uintptr, id string) (uintptr, error) {
 	name, err := syscall.UTF16PtrFromString(id)

@@ -125,11 +125,23 @@ func (s *duplexStream) Commit() error {
 }
 
 func (s *duplexStream) Clock() (outNano, inNano int64) {
+	outNano, _ = s.render.Clock()
 	_, inNano = s.capture.Clock()
-	return 0, inNano
+	return outNano, inNano
 }
 
-func (s *duplexStream) Deadlines() (wakeNano, commitNano int64) { return 0, 0 }
+func (s *duplexStream) ClockSample() driver.ClockSample {
+	output := s.render.ClockSample()
+	input := s.capture.ClockSample()
+	output.InputPosition = input.InputPosition
+	output.InputFrequency = input.InputFrequency
+	output.InputQPCNano = input.InputQPCNano
+	return output
+}
+
+func (s *duplexStream) Deadlines() (wakeNano, commitNano int64) {
+	return s.render.Deadlines()
+}
 
 func (s *duplexStream) Dropouts() uint64 {
 	return s.capture.Dropouts() + s.render.Dropouts()
