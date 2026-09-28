@@ -129,7 +129,7 @@ func newPCMStream(outFD, inFD int, outP, inP pcmParams, ops pcmOps, owned bool) 
 		params.Periods = outP.periods
 		params.OutChannels = outP.channels
 		params.OutFormat = outP.format
-		params.LatencyOut = pcmLatency(outP)
+		params.LatencyOut = pcmLatency(outP, inFD >= 0)
 	}
 	if inFD >= 0 {
 		if err := validatePCMParams(inP); err != nil {
@@ -145,7 +145,7 @@ func newPCMStream(outFD, inFD int, outP, inP pcmParams, ops pcmOps, owned bool) 
 		}
 		params.InChannels = inP.channels
 		params.InFormat = inP.format
-		params.LatencyIn = pcmLatency(inP)
+		params.LatencyIn = pcmLatency(inP, outFD >= 0)
 	}
 
 	s := &pcmStream{
@@ -209,13 +209,20 @@ func validatePCMParams(p pcmParams) error {
 	return nil
 }
 
-func pcmLatency(p pcmParams) time.Duration {
+// pcmLatency reports one side's buffer latency. In a duplex stream the frames
+// in flight across both buffers total one buffer, so each side reports half of
+// its buffer and LatencyIn+LatencyOut equals the measured round trip. A
+// one-sided stream keeps its whole buffer.
+func pcmLatency(p pcmParams, duplex bool) time.Duration {
 	frames := p.bufferFrames
 	if frames == 0 {
 		frames = uint64(p.period) * uint64(p.periods)
 	}
-	// Each side contributes half of its PCM buffer to a duplex round trip.
-	return time.Duration(frames * uint64(time.Second) / uint64(p.rate) / 2)
+	latency := time.Duration(frames * uint64(time.Second) / uint64(p.rate))
+	if duplex {
+		latency /= 2
+	}
+	return latency
 }
 
 func newPCMEndpoint(fd int, p pcmParams, req uintptr) (pcmEndpoint, error) {
