@@ -51,6 +51,8 @@ type Report struct {
 	OutFormat             string       `json:"out_format,omitempty"`
 	LatencyInUS           float64      `json:"latency_in_us"`
 	LatencyOutUS          float64      `json:"latency_out_us"`
+	LatencyInSource       string       `json:"latency_in_source,omitempty"`
+	LatencyOutSource      string       `json:"latency_out_source,omitempty"`
 	DurationSeconds       float64      `json:"duration_s"`
 	Load                  []string     `json:"load"`
 	Priority              string       `json:"priority"`

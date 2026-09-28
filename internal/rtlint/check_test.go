@@ -88,6 +88,7 @@ func TestCheckerCoversRealtimeRulesIndividually(t *testing.T) {
 		{"errors.New", "package p\nimport \"errors\"\n//tymbal:rt\nfunc bad(){ _=errors.New(\"x\") }", "forbidden call errors.New"},
 		{"time.Sleep", "package p\nimport \"time\"\n//tymbal:rt\nfunc bad(){ time.Sleep(1) }", "forbidden call time.Sleep"},
 		{"time.After", "package p\nimport \"time\"\n//tymbal:rt\nfunc bad(){ _=time.After(1) }", "forbidden call time.After"},
+		{"variadic procedure call", "package p\nimport \"syscall\"\n//tymbal:rt\nfunc bad(proc *syscall.LazyProc){ proc.Call(1) }", "variadic procedure Call on real-time path"},
 		{"mutex type", "package p\nimport \"sync\"\n//tymbal:rt\nfunc bad(){ var _ sync.Mutex }", "sync mutex type"},
 		{"mutex operation", "package p\n//tymbal:rt\nfunc bad(m interface{Lock()}){ m.Lock() }", "lock operation"},
 		{"map read", "package p\n//tymbal:rt\nfunc bad(m map[int]int){ _=m[0] }", "map access"},

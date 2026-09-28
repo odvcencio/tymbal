@@ -45,7 +45,14 @@ var (
 	procSetEvent               = kernel32.NewProc("SetEvent")
 	procCloseHandle            = kernel32.NewProc("CloseHandle")
 	procWaitForMultipleObjects = kernel32.NewProc("WaitForMultipleObjects")
+	errSetEventFailed          = errors.New("tymbal wasapi: SetEvent failed")
 )
+
+func init() {
+	// Stop interrupts a blocked stream while the callback allocation scope is
+	// still open. Resolve this procedure before any stream starts.
+	_ = procSetEvent.Find()
+}
 
 type sharedPeriodRange struct {
 	defaultFrames     uint32
@@ -988,15 +995,15 @@ func createEvent() (uintptr, error) {
 	return handle, nil
 }
 
+//tymbal:rt
 func signalEvent(handle uintptr) error {
-	result, _, callErr := procSetEvent.Call(handle)
+	// Proc.Call is variadic and LazyProc.Call resolves its name on first use;
+	// both can allocate while Stop wakes the callback thread.
+	result, _, _ := syscall.Syscall(procSetEvent.Addr(), 1, handle, 0, 0)
 	if result != 0 {
 		return nil
 	}
-	if callErr == nil {
-		callErr = syscall.EINVAL
-	}
-	return fmt.Errorf("tymbal wasapi: SetEvent: %w", callErr)
+	return errSetEventFailed
 }
 
 func closeEvent(handle uintptr) error {

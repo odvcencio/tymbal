@@ -162,26 +162,19 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 		}
 		defer worker.close()
 	}
-	if runtime.GOOS == "windows" {
-		previousProcs := runtime.GOMAXPROCS(1)
-		defer runtime.GOMAXPROCS(previousProcs)
-	}
 	warmThreads()
 	var runtimePriority string
-	var restorePriority func() error
+	restorePriority := func() error { return nil }
 	if runtime.GOOS == "windows" {
+		var processPriority string
 		var priorityErr error
-		restorePriority, runtimePriority, priorityErr = rt.RaiseProcessPriority()
+		restorePriority, processPriority, priorityErr = rt.RaiseProcessPriority()
 		if priorityErr != nil {
-			runPriorityErr := priorityErr
-			defer func() { _ = restorePriority() }()
-			return Report{}, runPriorityErr
+			return Report{}, priorityErr
 		}
-		runtimePriority += "; GOMAXPROCS=1"
-	} else {
-		restorePriority = func() error { return nil }
+		defer func() { _ = restorePriority() }()
+		runtimePriority = fmt.Sprintf("%s; GOMAXPROCS=%d (runtime default)", processPriority, runtime.GOMAXPROCS(0))
 	}
-	defer func() { _ = restorePriority() }()
 	if err := stream.Start(); err != nil {
 		_ = stream.Close()
 		return Report{}, err
@@ -215,6 +208,13 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 
 	mode := "silent-render"
 	inputID, inFormat := "", ""
+	latencyInSource, latencyOutSource := "", ""
+	if host.Name() == "wasapi" {
+		latencyOutSource = "IAudioClient.GetStreamLatency after Initialize"
+		if input != nil {
+			latencyInSource = "IAudioClient.GetStreamLatency after Initialize"
+		}
+	}
 	if input != nil {
 		mode = "silent-duplex"
 		inputID, inFormat = input.ID, actual.InFormat
@@ -225,6 +225,7 @@ func NativeSilentSoak(host tymbal.Host, output tymbal.Device, input *tymbal.Devi
 		InFormat: inFormat, OutFormat: actual.OutFormat,
 		LatencyInUS:     float64(actual.LatencyIn) / float64(time.Microsecond),
 		LatencyOutUS:    float64(actual.LatencyOut) / float64(time.Microsecond),
+		LatencyInSource: latencyInSource, LatencyOutSource: latencyOutSource,
 		DurationSeconds: float64(metrics.processedFrames) / float64(actual.SampleRate),
 		Load:            append([]string(nil), opts.Load...), Priority: actual.Priority,
 		RuntimePriority:   runtimePriority,

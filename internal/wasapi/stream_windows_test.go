@@ -144,6 +144,21 @@ func TestQPCToMonotonicNano(t *testing.T) {
 	}
 }
 
+func TestSignalEventDoesNotAllocate(t *testing.T) {
+	event, err := createEvent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeEvent(event)
+	var signalErr error
+	allocs := testing.AllocsPerRun(20, func() {
+		signalErr = signalEvent(event)
+	})
+	if signalErr != nil || allocs != 0 {
+		t.Fatalf("signalEvent allocations=%v error=%v, want zero allocations and no error", allocs, signalErr)
+	}
+}
+
 func TestNativeSharedRenderEventAndInterrupt(t *testing.T) {
 	devices, err := New().Devices()
 	if err != nil {
