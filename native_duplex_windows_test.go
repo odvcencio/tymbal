@@ -138,6 +138,9 @@ func TestNativePublicDuplex(t *testing.T) {
 	if callbacks.Load() < 2 || stats.Callbacks != callbacks.Load() || invalid.Load() || capturedFrames == 0 {
 		t.Fatalf("duplex callback incomplete: observed=%d reported=%d frames=%d invalid=%t", callbacks.Load(), stats.Callbacks, capturedFrames, invalid.Load())
 	}
+	if stats.Dropouts != 0 {
+		t.Fatalf("duplex audio gate: dropouts=%d, want zero", stats.Dropouts)
+	}
 	evidence, err := writeFloatWave("tymbal-wasapi-duplex-", rate, input.Inputs, captured[:capturedFrames*input.Inputs])
 	if err != nil {
 		t.Fatalf("write duplex capture evidence: %v", err)
