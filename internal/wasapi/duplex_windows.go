@@ -12,11 +12,12 @@ import (
 // duplexStream combines the shared-mode capture and render clients on one
 // locked stream thread. Both clients use the same callback period.
 type duplexStream struct {
-	capture *captureStream
-	render  *wasapiStream
-	params  driver.Params
-	started bool
-	stopped bool
+	capture       *captureStream
+	render        *wasapiStream
+	params        driver.Params
+	started       bool
+	stopped       bool
+	capturePrimed bool
 }
 
 var _ driver.Stream = (*duplexStream)(nil)
@@ -87,6 +88,16 @@ func (s *duplexStream) Start() error {
 		s.stopped = true
 		return err
 	}
+	// Let capture produce its first period before starting the render clock.
+	// The input period stays staged for the first callback, giving capture one
+	// period of lead so its event cannot hold the render callback past its
+	// deadline on endpoints whose capture event follows the render event.
+	if err := s.capture.Wait(); err != nil {
+		cleanupErr := s.capture.Stop()
+		s.stopped = true
+		return errors.Join(err, cleanupErr)
+	}
+	s.capturePrimed = true
 	if err := s.render.Start(); err != nil {
 		cleanupErr := s.capture.Stop()
 		s.stopped = true
@@ -100,8 +111,12 @@ func (s *duplexStream) Wait() error {
 	if !s.started || s.stopped {
 		return fmt.Errorf("tymbal wasapi: wait outside a running duplex stream")
 	}
-	if err := s.capture.Wait(); err != nil {
-		return err
+	if s.capturePrimed {
+		s.capturePrimed = false
+	} else {
+		if err := s.capture.Wait(); err != nil {
+			return err
+		}
 	}
 	return s.render.Wait()
 }
