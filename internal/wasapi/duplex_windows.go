@@ -111,6 +111,9 @@ func (s *duplexStream) Wait() error {
 	if !s.started || s.stopped {
 		return fmt.Errorf("tymbal wasapi: wait outside a running duplex stream")
 	}
+	if s.capture.stager.ready || s.render.ready {
+		return fmt.Errorf("tymbal wasapi: wait before committing the previous duplex period")
+	}
 	for {
 		captureReady, err := s.capture.pollReady()
 		if err != nil {
