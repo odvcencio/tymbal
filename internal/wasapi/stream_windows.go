@@ -448,37 +448,11 @@ func (s *wasapiStream) Wait() error {
 		return fmt.Errorf("tymbal wasapi: wait before committing the previous render period")
 	}
 	for {
-		if s.interruptRequested.Load() {
-			return driver.ErrInterrupted
-		}
-		s.renderPadding = 0
-		hr := comCall1(s.client, audioClientGetCurrentPadding, uintptr(unsafe.Pointer(&s.renderPadding)))
-		runtime.KeepAlive(s)
-		if err := renderHRESULT("IAudioClient.GetCurrentPadding", hr); err != nil {
-			return err
-		}
-		available, err := renderPeriodAvailable(s.bufferFrames, s.renderPadding, s.params.Period)
+		ready, err := s.pollReady()
 		if err != nil {
 			return err
 		}
-		if available {
-			if s.interruptRequested.Load() {
-				return driver.ErrInterrupted
-			}
-			if err := s.sampleAudioClock(); err != nil {
-				return err
-			}
-			s.clockDueNano = qpcToMonotonicNano(s.clockQPC100ns, s.clockQPCOffset)
-			deadlineQPC, ok := audioClockDeadlineQPC(s.clockStartQPC, s.clockDeadlineFrames, s.params.SampleRate)
-			if !ok || s.clockDueNano == 0 || deadlineQPC == 0 {
-				return fmt.Errorf("tymbal wasapi: invalid audio clock deadline")
-			}
-			s.clockDeadlineNano = qpcToMonotonicNano(deadlineQPC, s.clockQPCOffset)
-			if s.clockDeadlineFrames > ^uint64(0)-uint64(s.params.Period) || s.clockDeadlineNano == 0 {
-				return fmt.Errorf("tymbal wasapi: audio clock deadline overflow")
-			}
-			s.clockDeadlineFrames += uint64(s.params.Period)
-			s.ready = true
+		if ready {
 			return nil
 		}
 		result, _, callErr := syscall.SyscallN(s.waitProc,
@@ -497,6 +471,48 @@ func (s *wasapiStream) Wait() error {
 			return fmt.Errorf("tymbal wasapi: unexpected wait result 0x%08X", uint32(result))
 		}
 	}
+}
+
+// pollReady checks the render client without blocking so duplex can wait on
+// capture and render notifications together.
+func (s *wasapiStream) pollReady() (bool, error) {
+	if s.interruptRequested.Load() {
+		return false, driver.ErrInterrupted
+	}
+	if s.ready {
+		return true, nil
+	}
+	s.renderPadding = 0
+	hr := comCall1(s.client, audioClientGetCurrentPadding, uintptr(unsafe.Pointer(&s.renderPadding)))
+	runtime.KeepAlive(s)
+	if err := renderHRESULT("IAudioClient.GetCurrentPadding", hr); err != nil {
+		return false, err
+	}
+	available, err := renderPeriodAvailable(s.bufferFrames, s.renderPadding, s.params.Period)
+	if err != nil {
+		return false, err
+	}
+	if !available {
+		return false, nil
+	}
+	if s.interruptRequested.Load() {
+		return false, driver.ErrInterrupted
+	}
+	if err := s.sampleAudioClock(); err != nil {
+		return false, err
+	}
+	s.clockDueNano = qpcToMonotonicNano(s.clockQPC100ns, s.clockQPCOffset)
+	deadlineQPC, ok := audioClockDeadlineQPC(s.clockStartQPC, s.clockDeadlineFrames, s.params.SampleRate)
+	if !ok || s.clockDueNano == 0 || deadlineQPC == 0 {
+		return false, fmt.Errorf("tymbal wasapi: invalid audio clock deadline")
+	}
+	s.clockDeadlineNano = qpcToMonotonicNano(deadlineQPC, s.clockQPCOffset)
+	if s.clockDeadlineFrames > ^uint64(0)-uint64(s.params.Period) || s.clockDeadlineNano == 0 {
+		return false, fmt.Errorf("tymbal wasapi: audio clock deadline overflow")
+	}
+	s.clockDeadlineFrames += uint64(s.params.Period)
+	s.ready = true
+	return true, nil
 }
 
 func renderPeriodAvailable(bufferFrames, padding uint32, period int) (bool, error) {

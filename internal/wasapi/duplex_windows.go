@@ -5,6 +5,9 @@ package wasapi
 import (
 	"errors"
 	"fmt"
+	"runtime"
+	"syscall"
+	"unsafe"
 
 	"m31labs.dev/tymbal/internal/driver"
 )
@@ -17,6 +20,9 @@ type duplexStream struct {
 	params  driver.Params
 	started bool
 	stopped bool
+
+	waitHandles [4]uintptr
+	waitProc    uintptr
 }
 
 var _ driver.Stream = (*duplexStream)(nil)
@@ -93,6 +99,11 @@ func (s *duplexStream) Start() error {
 		return errors.Join(err, cleanupErr)
 	}
 	s.started = true
+	s.waitHandles = [4]uintptr{
+		s.capture.audioEvent, s.capture.interruptEvent,
+		s.render.audioEvent, s.render.interruptEvent,
+	}
+	s.waitProc = procWaitForMultipleObjects.Addr()
 	return nil
 }
 
@@ -100,10 +111,39 @@ func (s *duplexStream) Wait() error {
 	if !s.started || s.stopped {
 		return fmt.Errorf("tymbal wasapi: wait outside a running duplex stream")
 	}
-	if err := s.capture.Wait(); err != nil {
-		return err
+	if s.capture.stager.ready || s.render.ready {
+		return fmt.Errorf("tymbal wasapi: wait before committing the previous duplex period")
 	}
-	return s.render.Wait()
+	for {
+		captureReady, err := s.capture.pollReady()
+		if err != nil {
+			return err
+		}
+		renderReady, err := s.render.pollReady()
+		if err != nil {
+			return err
+		}
+		if captureReady && renderReady {
+			return nil
+		}
+
+		result, _, callErr := syscall.SyscallN(s.waitProc,
+			4, uintptr(unsafe.Pointer(&s.waitHandles[0])), 0, infinite)
+		runtime.KeepAlive(s)
+		switch result {
+		case waitObject0 + 1, waitObject0 + 3:
+			return driver.ErrInterrupted
+		case waitObject0, waitObject0 + 2:
+			continue
+		case waitFailed:
+			if callErr == 0 {
+				callErr = syscall.EINVAL
+			}
+			return fmt.Errorf("tymbal wasapi: wait for duplex audio events: %w", callErr)
+		default:
+			return fmt.Errorf("tymbal wasapi: unexpected duplex wait result 0x%08X", uint32(result))
+		}
+	}
 }
 
 func (s *duplexStream) Interrupt() {

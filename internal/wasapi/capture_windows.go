@@ -449,19 +449,14 @@ func (s *captureStream) Wait() error {
 	if s.stager.ready {
 		return fmt.Errorf("tymbal wasapi: wait before committing the previous capture period")
 	}
-	if s.interruptRequested.Load() {
-		return driver.ErrInterrupted
-	}
-	if s.stager.preparePeriod() {
-		return nil
-	}
-	if err := s.drainCapturePackets(); err != nil {
-		return err
-	}
-	if s.stager.preparePeriod() {
-		return nil
-	}
 	for {
+		ready, err := s.pollReady()
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
 		result, _, callErr := syscall.SyscallN(s.waitProc,
 			2,
 			uintptr(unsafe.Pointer(&s.waitHandles[0])),
@@ -481,13 +476,22 @@ func (s *captureStream) Wait() error {
 		if result != waitObject0 {
 			return fmt.Errorf("tymbal wasapi: unexpected capture wait result 0x%08X", uint32(result))
 		}
-		if err := s.drainCapturePackets(); err != nil {
-			return err
-		}
-		if s.stager.preparePeriod() {
-			return nil
-		}
 	}
+}
+
+// pollReady drains available capture packets without blocking, allowing duplex
+// to wait on both endpoint events from a single locked stream thread.
+func (s *captureStream) pollReady() (bool, error) {
+	if s.interruptRequested.Load() {
+		return false, driver.ErrInterrupted
+	}
+	if s.stager.preparePeriod() {
+		return true, nil
+	}
+	if err := s.drainCapturePackets(); err != nil {
+		return false, err
+	}
+	return s.stager.preparePeriod(), nil
 }
 
 func (s *captureStream) drainCapturePackets() error {
