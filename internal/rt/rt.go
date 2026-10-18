@@ -75,8 +75,8 @@ func LockProcessMemory() error { return ErrUnsupported }
 // sampler's readings between them never stop the world, so they are lower
 // bounds.
 //
-// The sampler waits in SleepThread, not on a Go timer or channel, so on Linux
-// and Windows, where SleepThread is a system call, the watchdog allocates
+// The sampler waits in SleepThread, not on a Go timer or channel, so on Linux,
+// Windows and macOS, where SleepThread is a system call, the watchdog allocates
 // nothing after StartWatchdog returns. stop does not wait for the sampler. The
 // sampler exits within 100 ms and never reports more than stop's exact total.
 //
