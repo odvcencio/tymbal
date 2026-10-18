@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -76,8 +77,8 @@ func TestOpenRejectsWhatItCannotDo(t *testing.T) {
 		req  driver.Request
 		want error
 	}{
-		"input":       {driver.Request{Input: &out, InChannels: 1, SampleRate: 48000, Period: 128, Periods: 2}, driver.ErrUnsupported},
-		"duplex":      {driver.Request{Output: &out, Input: &out, OutChannels: 2, InChannels: 1, SampleRate: 48000, Period: 128, Periods: 2}, driver.ErrUnsupported},
+		"input":       {driver.Request{Input: &out, InChannels: 0, SampleRate: 48000, Period: 128, Periods: 2}, driver.ErrFormat},
+		"duplex":      {driver.Request{Output: &out, Input: &out, OutChannels: 2, InChannels: 1, SampleRate: 48000, Period: 0, Periods: 2}, driver.ErrFormat},
 		"no output":   {driver.Request{SampleRate: 48000, Period: 128, Periods: 2}, driver.ErrUnsupported},
 		"exclusive":   {driver.Request{Output: &out, OutChannels: 2, SampleRate: 48000, Period: 128, Periods: 2, Exclusive: true}, driver.ErrUnsupported},
 		"no channels": {driver.Request{Output: &out, SampleRate: 48000, Period: 128, Periods: 2}, driver.ErrFormat},
@@ -136,6 +137,9 @@ func TestOpenRejectsAForeignSampleRate(t *testing.T) {
 // It is audible: a quiet tone (-20 dBFS, with 10 ms fades) for half a second.
 // A machine with no output device skips it.
 func TestSmokeSine(t *testing.T) {
+	if os.Getenv("TYMBAL_NATIVE_AUDIO") != "1" {
+		t.Skip("set TYMBAL_NATIVE_AUDIO=1 to authorize native speaker output")
+	}
 	// The stream core calls Wait, Buffers and Commit from one locked thread.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -255,6 +259,9 @@ func TestSmokeSine(t *testing.T) {
 // Open and Close without ever starting must release the audio unit, the ring
 // and the semaphore, and so must a second Close.
 func TestOpenCloseWithoutStart(t *testing.T) {
+	if os.Getenv("TYMBAL_NATIVE_AUDIO") != "1" {
+		t.Skip("set TYMBAL_NATIVE_AUDIO=1 to open native audio hardware")
+	}
 	b := New()
 	out, err := b.Default(dirOutput)
 	if errors.Is(err, errNoDevice) {
@@ -283,6 +290,9 @@ func TestOpenCloseWithoutStart(t *testing.T) {
 // Close must stop a stream that is still running, as the stream core's Close
 // does when it interrupts a running stream, and leave the device usable.
 func TestCloseStopsARunningStream(t *testing.T) {
+	if os.Getenv("TYMBAL_NATIVE_AUDIO") != "1" {
+		t.Skip("set TYMBAL_NATIVE_AUDIO=1 to open native audio hardware")
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 

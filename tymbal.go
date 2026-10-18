@@ -18,6 +18,7 @@ var (
 	ErrBusy        = errors.New("tymbal: device busy")
 	ErrFormat      = errors.New("tymbal: no supported format")
 	ErrUnsupported = errors.New("tymbal: not supported by this host")
+	ErrPermission  = errors.New("tymbal: microphone permission denied")
 	ErrCallback    = errors.New("tymbal: callback panicked")
 	ErrState       = errors.New("tymbal: invalid stream state")
 )
@@ -116,7 +117,10 @@ type DeviceEvent struct {
 	Device Device
 }
 
-// Config requests a stream. A nil device disables that direction.
+// Config requests a stream. A nil device disables that direction. On CoreAudio,
+// independent input devices are converted to SampleRate with a band-limited
+// rate bridge; Time.InputPosition/InputFrequency still identify the original
+// capture clock. Equal-rate input without clock correction preserves PCM bits.
 type Config struct {
 	Output, Input           *Device
 	OutChannels, InChannels int

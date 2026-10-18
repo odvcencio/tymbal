@@ -248,6 +248,11 @@ func receiverType(expr ast.Expr) string {
 }
 
 func checkFunction(fset *token.FileSet, fn *ast.FuncDecl, imports map[string]string, rules packageRules, markedPackages map[string]map[string]bool, issues *[]Issue) {
+	// Explicitly marked assembly/runtime gateways have no Go body to inspect.
+	// Their declarations still enter the package's realtime call allowlist.
+	if fn.Body == nil {
+		return
+	}
 	report := func(node ast.Node, message string) {
 		*issues = append(*issues, Issue{fset.Position(node.Pos()), message})
 	}

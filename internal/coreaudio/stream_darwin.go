@@ -32,9 +32,10 @@ const (
 )
 
 var (
-	errState        = errors.New("coreaudio: invalid stream state")
-	errWaitCommit   = errors.New("coreaudio: Wait before committing the previous period")
-	errRingGeometry = fmt.Errorf("%w: ring geometry out of range", driver.ErrFormat)
+	errState         = errors.New("coreaudio: invalid stream state")
+	errWaitCommit    = errors.New("coreaudio: Wait before committing the previous period")
+	errRingGeometry  = fmt.Errorf("%w: ring geometry out of range", driver.ErrFormat)
+	errSemaphoreWait = errors.New("coreaudio: semaphore wait failed")
 )
 
 // streamConfig is the negotiated geometry newStream builds a stream from.
@@ -142,7 +143,8 @@ func newStream(cfg streamConfig) (*stream, error) {
 	c.mask = uint64(capacity - 1)
 	c.fbytes = uint64(frameBytes)
 	c.data = uintptr(unsafe.Pointer(&data[0]))
-	c.sem = uint64(s.sem)
+	semaphore := s.sem
+	c.sem = uint64(semaphore)
 	c.signal = fnsemaphore_signal
 	c.memcpy = fnmemcpy
 	c.memset = fnmemset
@@ -281,12 +283,14 @@ func (s *stream) Wait() error {
 				return driver.ErrLost
 			}
 		default:
-			return fmt.Errorf("coreaudio: semaphore_timedwait failed: kern_return_t %d", kr)
+			return errSemaphoreWait
 		}
 	}
 }
 
 // deviceGone asks Core Audio whether the attached device has disappeared.
+//
+//tymbal:rt
 func (s *stream) deviceGone() bool {
 	if s.device == 0 {
 		return false
@@ -385,8 +389,6 @@ func (s *stream) Recover() error { return nil }
 
 // Stop stops the unit. When AudioOutputUnitStop returns the render callback has
 // finished its last call and will not run again.
-//
-//tymbal:rt
 func (s *stream) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

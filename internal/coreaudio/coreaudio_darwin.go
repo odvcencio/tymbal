@@ -1,7 +1,7 @@
 //go:build darwin && (amd64 || arm64)
 
 // Package coreaudio implements macOS Core Audio endpoint discovery and AUHAL
-// output streams without cgo and without a run-time FFI library. It does not
+// input, output and duplex without cgo and without a run-time FFI library. It does not
 // use cgo, so there is no C preamble and no C compiler in the build. It does
 // not use a dlopen-style loader library such as ebitengine's either. It builds
 // with CGO_ENABLED=0, and cross-compiles from any host.
@@ -52,14 +52,18 @@
 //
 // # Status
 //
-// Output only, on the default or any other output device, at the device's
-// current nominal sample rate, as interleaved Float32. Not yet implemented:
-// input and duplex streams, device-change events (Watch), real-time thread
-// policy and the IO workgroup, and the ten-minute soak that gates them.
+// Output, input and duplex use interleaved Float32 at the requested stream
+// rate. Output retains its device's nominal rate. Input may use a separate
+// device/rate/clock; a bounded ring and 128-tap band-limited converter map it
+// to the stream rate without changing global nominal device rates. The input
+// timestamp and position retain their native capture-clock meaning.
+// Microphone authorization is requested only when opening valid input.
+// Not yet implemented: device-change notifications (Watch), exclusive/hog
+// mode and Audio Workgroup membership. Devices can be refreshed explicitly.
 //
 // # Linking
 //
-// The Go linker links internally and records the three frameworks itself. That
+// The Go linker links internally and records the frameworks itself. That
 // holds with CGO_ENABLED=0, and with CGO_ENABLED=1 as long as the only cgo in
 // the program is the standard library's (net, os/user). A program that also
 // contains cgo code of its own is linked externally, and the toolchain does not
@@ -67,7 +71,7 @@
 // (//go:cgo_ldflag is refused), so that build fails with undefined
 // _AudioObject* symbols unless it sets
 //
-//	CGO_LDFLAGS="-framework CoreAudio -framework AudioToolbox -framework CoreFoundation"
+//	CGO_LDFLAGS="-framework CoreAudio -framework AudioToolbox -framework CoreFoundation -framework AVFoundation"
 package coreaudio
 
 import (
@@ -201,8 +205,8 @@ func (*backend) Watch(fn func(driver.Event)) (stop func()) {
 	return func() {}
 }
 
-// Open creates an AUHAL output stream on req.Output at the device's current
-// sample rate.
+// Open creates AUHAL streams at the devices' current sample rates. Input may
+// use a different device clock; the duplex rate bridge converts it to output.
 //
 // It asks the HAL for an IO buffer of the requested period (clamped to the
 // device's range), because a small period is only worth having if the device's
@@ -210,7 +214,14 @@ func (*backend) Watch(fn func(driver.Event)) (stop func()) {
 // still reads the old size, and it ends with the process. Open never changes
 // the device's sample rate; a request for another rate fails with
 // driver.ErrFormat.
-func (*backend) Open(req driver.Request) (driver.Stream, error) {
+func (b *backend) Open(req driver.Request) (driver.Stream, error) {
+	if req.Input != nil {
+		return b.openInput(req)
+	}
+	return b.openOutput(req)
+}
+
+func (*backend) openOutput(req driver.Request) (driver.Stream, error) {
 	switch {
 	case req.Input != nil:
 		return nil, fmt.Errorf("%w: coreaudio input and duplex streams are not implemented", driver.ErrUnsupported)
@@ -356,6 +367,9 @@ func describeDevice(id uint32) (driver.Info, bool) {
 		info.SampleRates = []int{int(math.Round(rate))}
 	}
 	info.MinPeriod, info.MaxPeriod = bufferRange(id)
+	if frames, err := u32Prop(id, selBufferFrameSize, scopeGlobal); err == nil {
+		info.DefaultPeriod = int(frames)
+	}
 	return info, true
 }
 

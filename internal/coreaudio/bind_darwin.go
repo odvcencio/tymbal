@@ -44,6 +44,7 @@ import (
 //go:cgo_import_dynamic tymbal_AudioUnitUninitialize AudioUnitUninitialize "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox"
 //go:cgo_import_dynamic tymbal_AudioOutputUnitStart AudioOutputUnitStart "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox"
 //go:cgo_import_dynamic tymbal_AudioOutputUnitStop AudioOutputUnitStop "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox"
+//go:cgo_import_dynamic tymbal_AudioUnitRender AudioUnitRender "/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox"
 
 // CoreFoundation
 //go:cgo_import_dynamic tymbal_CFRelease CFRelease "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"
@@ -60,6 +61,8 @@ import (
 //go:cgo_import_dynamic tymbal_pthread_sigmask pthread_sigmask "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic tymbal_memcpy memcpy "/usr/lib/libSystem.B.dylib"
 //go:cgo_import_dynamic tymbal_memset memset "/usr/lib/libSystem.B.dylib"
+//go:cgo_import_dynamic tymbal_mach_absolute_time mach_absolute_time "/usr/lib/libSystem.B.dylib"
+//go:cgo_import_dynamic tymbal_mach_timebase_info mach_timebase_info "/usr/lib/libSystem.B.dylib"
 
 // fn* hold the address of each import's trampoline. bind_darwin.s defines
 // them with DATA directives; Go never assigns them.
@@ -75,6 +78,9 @@ var (
 	fnAudioUnitUninitialize             uintptr
 	fnAudioOutputUnitStart              uintptr
 	fnAudioOutputUnitStop               uintptr
+	fnAudioUnitRender                   uintptr
+	fnmach_absolute_time                uintptr
+	fnmach_timebase_info                uintptr
 	fnCFRelease                         uintptr
 	fnCFStringGetLength                 uintptr
 	fnCFStringGetMaximumSizeForEncoding uintptr
@@ -103,9 +109,11 @@ var (
 // that C keeps after the call returns lives in a ring.Arena instead.
 
 //go:noescape
+//tymbal:rt
 func syscall_syscall(fn, a1, a2, a3 uintptr) (r1, r2 uintptr, err syscall.Errno)
 
 //go:noescape
+//tymbal:rt
 func syscall_syscall6(fn, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err syscall.Errno)
 
 //go:linkname syscall_syscall syscall.syscall
@@ -171,8 +179,11 @@ type propertyAddress struct{ selector, scope, element uint32 }
 
 // OSStatus AudioObjectGetPropertyData(AudioObjectID, const AudioObjectPropertyAddress *,
 // UInt32 qualifierSize, const void *qualifier, UInt32 *ioDataSize, void *outData).
+//
+//tymbal:rt
 func audioObjectGetPropertyData(obj, selector, scope uint32, size *uint32, data unsafe.Pointer) int32 {
-	addr := propertyAddress{selector: selector, scope: scope}
+	var addr propertyAddress
+	addr.selector, addr.scope = selector, scope
 	r, _, _ := syscall_syscall6(fnAudioObjectGetPropertyData, uintptr(obj), uintptr(unsafe.Pointer(&addr)), 0, 0,
 		uintptr(unsafe.Pointer(size)), uintptr(data))
 	return int32(r)
@@ -313,6 +324,8 @@ func semaphoreSignal(sem uint32) int32 {
 // semaphoreTimedWait is semaphore_timedwait(sem, mach_timespec_t{sec, nsec}).
 // The struct is eight bytes and travels by value in one register, with tv_sec
 // in the low word. It returns 0, kernTimedOut, kernAborted or an error.
+//
+//tymbal:rt
 func semaphoreTimedWait(sem uint32, d time.Duration) int32 {
 	if d < 0 {
 		d = 0
@@ -327,4 +340,17 @@ func semaphoreTimedWait(sem uint32, d time.Duration) int32 {
 func pthreadSigmask(how int, set, old *uint32) int32 {
 	r, _, _ := syscall_syscall(fnpthread_sigmask, uintptr(how), uintptr(unsafe.Pointer(set)), uintptr(unsafe.Pointer(old)))
 	return int32(r)
+}
+
+func machAbsoluteTime() uint64 {
+	r, _, _ := syscall_syscall(fnmach_absolute_time, 0, 0, 0)
+	return uint64(r)
+}
+func machTimebase() (uint32, uint32) {
+	var v struct{ numer, denom uint32 }
+	r, _, _ := syscall_syscall(fnmach_timebase_info, uintptr(unsafe.Pointer(&v)), 0, 0)
+	if r != 0 {
+		return 0, 0
+	}
+	return v.numer, v.denom
 }

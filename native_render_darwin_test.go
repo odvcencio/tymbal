@@ -3,6 +3,7 @@
 package tymbal_test
 
 import (
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,9 @@ import (
 //
 // A machine with no output device skips it.
 func TestNativePublicRender(t *testing.T) {
+	if os.Getenv("TYMBAL_NATIVE_AUDIO") != "1" {
+		t.Skip("set TYMBAL_NATIVE_AUDIO=1 to authorize native output")
+	}
 	var host tymbal.Host
 	for _, candidate := range tymbal.Hosts() {
 		if candidate.Name() == "coreaudio" {
@@ -50,7 +54,11 @@ func TestNativePublicRender(t *testing.T) {
 		t.Fatalf("default output is not usable: %+v", output)
 	}
 
-	const requestedPeriod = 256
+	requestedPeriod := 256
+	duration := 500 * time.Millisecond
+	if os.Getenv("TYMBAL_NATIVE_OUTPUT_PROBE") == "1" {
+		requestedPeriod, duration = 128, 15*time.Second
+	}
 	var callbacks atomic.Uint64
 	var invalid atomic.Bool
 	var previousFrame uint64
@@ -91,7 +99,7 @@ func TestNativePublicRender(t *testing.T) {
 	if err := stream.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(duration)
 	for i := 0; i < 2; i++ {
 		if err := stream.Stop(); err != nil {
 			t.Fatalf("Stop %d: %v", i, err)
@@ -112,7 +120,8 @@ func TestNativePublicRender(t *testing.T) {
 	if callbacks.Load() < 20 || stats.Callbacks != callbacks.Load() || invalid.Load() {
 		t.Fatalf("incomplete render callbacks: observed=%d reported=%d invalid=%t", callbacks.Load(), stats.Callbacks, invalid.Load())
 	}
-	t.Logf("coreaudio render: device=%q rate=%d period=%d periods=%d channels=%d format=%s latency_out=%s callbacks=%d dropouts=%d priority=%s",
+	actual = stream.Actual()
+	t.Logf("coreaudio render: device=%q rate=%d period=%d periods=%d channels=%d format=%s latency_out=%s callbacks=%d dropouts=%d priority=%s deadline=%t late=%d callback_max=%s silent=true microphone_opened=false retained_pcm=false",
 		output.Name, actual.SampleRate, actual.Period, actual.Periods, actual.OutChannels, actual.OutFormat, actual.LatencyOut,
-		stats.Callbacks, stats.Dropouts, actual.Priority)
+		stats.Callbacks, stats.Dropouts, actual.Priority, actual.HasDeadline, stats.Late, stats.CallbackMax)
 }

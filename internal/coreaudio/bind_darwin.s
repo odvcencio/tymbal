@@ -131,3 +131,18 @@ TEXT tymbal_memset_trampoline<>(SB),NOSPLIT,$0-0
 GLOBL	·fnmemset(SB), RODATA, $8
 DATA	·fnmemset(SB)/8, $tymbal_memset_trampoline<>(SB)
 
+TEXT tymbal_AudioUnitRender_trampoline<>(SB),NOSPLIT,$0-0
+	JMP tymbal_AudioUnitRender(SB)
+GLOBL ·fnAudioUnitRender(SB), RODATA, $8
+DATA ·fnAudioUnitRender(SB)/8, $tymbal_AudioUnitRender_trampoline<>(SB)
+
+TEXT tymbal_mach_absolute_time_trampoline<>(SB),NOSPLIT,$0-0
+	JMP tymbal_mach_absolute_time(SB)
+GLOBL ·fnmach_absolute_time(SB), RODATA, $8
+DATA ·fnmach_absolute_time(SB)/8, $tymbal_mach_absolute_time_trampoline<>(SB)
+
+TEXT tymbal_mach_timebase_info_trampoline<>(SB),NOSPLIT,$0-0
+	JMP tymbal_mach_timebase_info(SB)
+GLOBL ·fnmach_timebase_info(SB), RODATA, $8
+DATA ·fnmach_timebase_info(SB)/8, $tymbal_mach_timebase_info_trampoline<>(SB)
+

@@ -60,6 +60,18 @@ func TestRepositoryRealtimeMarkers(t *testing.T) {
 	}
 }
 
+func TestRealtimeAssemblyGatewayDeclaration(t *testing.T) {
+	root := t.TempDir()
+	source := "package fixture\n//tymbal:rt\nfunc nativeCall(a uintptr) uintptr\n//tymbal:rt\nfunc callback() uintptr { return nativeCall(1) }\n"
+	if err := os.WriteFile(filepath.Join(root, "gateway.go"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := Check(root)
+	if err != nil || len(issues) != 0 {
+		t.Fatalf("assembly gateway: %v %v", issues, err)
+	}
+}
+
 func TestCheckerCoversRealtimeRulesIndividually(t *testing.T) {
 	tests := []struct {
 		name, source, want string
