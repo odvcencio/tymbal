@@ -53,6 +53,7 @@ func TestBackendFailuresUsePublicErrors(t *testing.T) {
 		startErr, commitErr, closeErr error
 		want                          error
 	}{
+		{name: "input permission denied", startErr: driver.ErrPermission, want: ErrPermission},
 		{name: "changed format at start", startErr: driver.ErrFormat, want: ErrFormat},
 		{name: "device lost during commit", commitErr: driver.ErrLost, want: ErrDeviceLost},
 		{name: "device lost during close", closeErr: driver.ErrLost, want: ErrDeviceLost},

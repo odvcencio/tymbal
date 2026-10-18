@@ -1,4 +1,4 @@
-//go:build !windows && (!linux || (!amd64 && !arm64))
+//go:build !windows && !(darwin && (amd64 || arm64)) && (!linux || (!amd64 && !arm64))
 
 package rt
 

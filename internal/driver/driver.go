@@ -27,6 +27,9 @@ var ErrFormat = errors.New("tymbal driver: unsupported format or period")
 // ErrUnsupported reports a backend mode that has not been implemented.
 var ErrUnsupported = errors.New("tymbal driver: unsupported mode")
 
+// ErrPermission reports a denied or restricted operating-system input permission.
+var ErrPermission = errors.New("tymbal driver: microphone permission denied")
+
 // Info describes a device without referring to the public package.
 type Info struct {
 	ID, Name             string

@@ -209,6 +209,8 @@ func mapBackendError(err error) error {
 		return nil
 	}
 	switch {
+	case errors.Is(err, driver.ErrPermission):
+		return fmt.Errorf("%w: %v", ErrPermission, err)
 	case errors.Is(err, driver.ErrBusy):
 		return fmt.Errorf("%w: %v", ErrBusy, err)
 	case errors.Is(err, driver.ErrFormat):

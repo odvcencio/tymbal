@@ -8,6 +8,24 @@ permissions:
   contents: read
 
 jobs:
+  coreaudio:
+    name: CoreAudio (${{ matrix.runner }}, no hardware)
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: "0"
+      TYMBAL_NATIVE_AUDIO: "0"
+      TYMBAL_NATIVE_CAPTURE: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Native tests, synthetic callbacks and permission preflight
+        run: go test ./...
   portable:
     runs-on: ubuntu-latest
     steps:
